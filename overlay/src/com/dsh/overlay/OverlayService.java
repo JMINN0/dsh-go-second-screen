@@ -74,6 +74,8 @@ public class OverlayService extends Service {
     // 为什么改大小不影响 AI：AI 操作的是**虚拟屏**（720×1592 不变），
     // 悬浮窗只是把画面缩放着显示。改的只是显示尺寸，不碰虚拟屏。
     private boolean hidden = false;   // 用户点了隐藏
+    private boolean looping = false;  // loop 线程是否在跑（避免重复启动）
+    private int portRetries = 0;      // 无端口时的重试计数（防无限自投递）
     private int userW = 0;            // 0 = 用默认值
     private int userH = 0;
 
@@ -90,9 +92,24 @@ public class OverlayService extends Service {
 
     @Override
     public int onStartCommand(Intent it, int flags, int startId) {
+        // **从持久化恢复端口。**
+        // 服务被系统杀掉后重启（或点通知恢复）时 Intent 里没有 port，
+        // 原来就直接 port=0 → 永远连不上，变成一个空窗口僵尸。
+        if (port <= 0) {
+            try {
+                android.content.SharedPreferences sp =
+                        getSharedPreferences("dsh_overlay", 0);
+                port = sp.getInt("port", 0);
+            } catch (Throwable t) { /* ignore */ }
+        }
         if (it != null) {
             int p = it.getIntExtra("port", 0);
-            if (p > 0 && p != port) { port = p; }
+            if (p > 0 && p != port) {
+                port = p;
+                try {
+                    getSharedPreferences("dsh_overlay", 0).edit().putInt("port", p).apply();
+                } catch (Throwable t) { /* ignore */ }
+            }
             if (it.getBooleanExtra("unhide", false)) { unhide(); }
         }
         if (root == null) {
@@ -291,8 +308,10 @@ public class OverlayService extends Service {
         if (Math.abs(a - appliedAspect) < 0.01f) return;
         appliedAspect = a;
         int maxW = (userW > 0) ? userW : dp(150);
-        // 高度上限：按比例算，但不超过屏高的 55%，免得挡住整个屏幕
-        int maxH = (userH > 0) ? userH : Math.min(Math.round(maxW / a), dp(400));
+        // **高度必须按当前 aspect 算，不能用用户拖出来的死值。**
+        // 原来 userH>0 就直接用 userH，换到横屏 App（aspect 0.45→2.2）时
+        // 画面被塞进竖屏时定死的框里，四周留黑 —— 又变成「大框套小图」。
+        int maxH = Math.min(Math.round(maxW / a), (userH > 0 && userW > 0) ? userH : dp(400));
         img.setMaxWidth(maxW);
         img.setMaxHeight(maxH);
         img.requestLayout();
@@ -300,8 +319,14 @@ public class OverlayService extends Service {
 
     /** 主循环：抓帧 + 抓状态。 */
     private void loop() {
-        if (!running || port <= 0) {
-            if (port <= 0) ui.postDelayed(new Runnable() { public void run() { loop(); } }, 500);
+        // **先判 running**：服务销毁后不能再自投递，否则 Handler 拿着已销毁的
+        // Service 无限 500ms 跑，是永久泄漏（对抗审查发现的）。
+        if (!running) return;
+        if (port <= 0) {
+            // 没端口：最多重试 30 次（15 秒），之后放弃，不再无限自投递
+            if (portRetries++ < 30) {
+                ui.postDelayed(new Runnable() { public void run() { loop(); } }, 500);
+            }
             return;
         }
         new Thread(new Runnable() {
@@ -386,12 +411,20 @@ public class OverlayService extends Service {
 
             // 每次读一个完整 multipart 段
             while (running) {
+                // **隐藏时直接断开**：原来点 ✕ 只是把窗口设 GONE，
+                // 解码和传输照跑，用户以为关了其实照样发热耗电。
+                if (hidden) break;
                 byte[] jpg = readOnePart(bis);
                 if (jpg == null) break;          // 流结束
                 if (jpg.length > 800) showJpeg(jpg);
-                // 每隔一段时间同步一次状态（不频繁，省请求）
-                if ((System.currentTimeMillis() - lastStatusAt) > 2000) {
-                    lastStatusAt = System.currentTimeMillis();
+                // **每 2 秒同步一次状态**。
+                // 原来这里只写了 lastStatusAt 却从不调用 pollStatus，
+                // 结果 aspect 永远不更新、状态文案冻在「AI 画面」、
+                // applyAspect() 的 setMaxWidth 那半边根本没机会跑。
+                long nowTs = System.currentTimeMillis();
+                if (nowTs - lastStatusAt > 2000) {
+                    lastStatusAt = nowTs;
+                    if (!pollStatus()) return everConnected;   // 推流没了 → 让外层收工
                 }
             }
         } catch (Throwable t) {
@@ -557,7 +590,11 @@ public class OverlayService extends Service {
     /** 恢复显示。 */
     private void unhide() {
         hidden = false;
+        portRetries = 0;                       // 重新允许重试连端口
         if (root != null) { root.setVisibility(View.VISIBLE); }
+        applyAspect();
+        // 重新开循环（隐藏时可能已经把 MJPEG 断开了）
+        if (!looping) { looping = true; loop(); }
         postNotification("看屏幕");
     }
 

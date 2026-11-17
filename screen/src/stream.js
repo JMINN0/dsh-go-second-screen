@@ -197,10 +197,13 @@ export function markTap(nx, ny, kind = 'tap') {
   const x = Number(nx), y = Number(ny);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   if (x < 0 || x > 1 || y < 0 || y > 1) return;
-  // **去重**：新点落在旧点 6% 宽度内就当同一次点击，替换而不是新增
-  // （否则密集点击会糊成一团，分不清哪次是刚发生的）
+  // **去重**：横向 6% 宽度、纵向按 aspect 折算（6% × aspect）。
+  // 原来是 x/y 都用 0.06：竖屏 aspect 0.45 时纵向判定区在像素上是横向的 2.2 倍，
+  // 上下相隔挺远的两次点击会被当成同一次，后一次把前一次覆盖掉。
+  const a = (st.aspect > 0.1 && st.aspect < 10) ? st.aspect : 0.5;
+  const dyMax = 0.06 * a;
   const near = st.marks.findIndex(m =>
-    Math.abs(m.nx - x) < 0.06 && Math.abs(m.ny - y) < 0.06);
+    Math.abs(m.nx - x) < 0.06 && Math.abs(m.ny - y) < dyMax);
   const rec = { nx: x, ny: y, at: Date.now(), kind: String(kind).slice(0, 8) };
   if (near >= 0) st.marks.splice(near, 1);
   st.marks.push(rec);
@@ -230,8 +233,10 @@ function marksToFilters(width) {
     const isNewest = (m === newest);
     // 透明度：最新 1.0 → 2s 后降到 0.35 常驻；旧的 ×0.5 更淡
     let alpha;
-    if (isNewest) alpha = ageSec < 2 ? 1.0 : 0.35;
-    else alpha = 0.22;
+    // **常驻透明度从 0.35 提到 0.45**：0xFF2D2D@0.35 叠在深色底（#101216）上
+    // 大约只有 #631B1E，偏暗；DSH 自己就是深色界面，这是主场景。
+    if (isNewest) alpha = ageSec < 2 ? 1.0 : 0.45;
+    else alpha = 0.28;
     // **新旧尺寸区分**：最新满血，旧的缩到 70%
     const scale = isNewest ? 1.0 : 0.7;
     const cx = Math.round(m.nx * W);
@@ -244,7 +249,8 @@ function marksToFilters(width) {
     const arm = Math.max(9, Math.round(W * 0.028 * scale));
     const box = Math.max(18, Math.round(W * 0.055 * scale));
     // 外框：先垫一层黑边，深浅背景都看得清
-    parts.push(`drawbox=x=${cx - box - 1}:y=${cy - box - 1}:w=${(box + 1) * 2}:h=${(box + 1) * 2}:color=black@${(alpha * 0.5).toFixed(2)}:t=1`);
+    // **描边改白色**：原来垫黑色，在深色背景上等于没有，还压低了边缘对比。
+    parts.push(`drawbox=x=${cx - box - 1}:y=${cy - box - 1}:w=${(box + 1) * 2}:h=${(box + 1) * 2}:color=white@${(alpha * 0.45).toFixed(2)}:t=1`);
     // 十字
     parts.push(`drawbox=x=${cx - arm}:y=${cy - t}:w=${arm * 2}:h=${t * 2}:color=0xFF2D2D@${alpha.toFixed(2)}:t=fill`);
     parts.push(`drawbox=x=${cx - t}:y=${cy - arm}:w=${t * 2}:h=${arm * 2}:color=0xFF2D2D@${alpha.toFixed(2)}:t=fill`);
@@ -261,6 +267,15 @@ export function setState(state) {
   st.lastActivityAt = Date.now();
   if (next === 'done') st.doneAt = Date.now();
   else if (next !== 'idle') st.doneAt = 0;
+  // **done/idle 时清掉点击标记。**
+  // 原来注释说「state 变 done/idle 才撤」但代码里没实现：AI 停手后
+  // tick 会在 15 秒时暂停抓帧，最后一帧上的十字就永远冻在画面上，
+  // 用户看到的是「AI 一直点在那」。
+  if (next === 'done' || next === 'idle') {
+    st.marks = [];
+    // 立刻重画一帧（不带标记），让画面干净地停住
+    if (st.running && !st.busy) { try { tick(); } catch { /* ignore */ } }
+  }
   writeState();
 }
 
@@ -444,7 +459,19 @@ export async function start({ sfId, displayId, fps = 2, width = 360, focusedApp 
 export async function stop() {
   st.running = false;
   if (st.timer) { clearInterval(st.timer); st.timer = null; }
+  // **必须把 MJPEG 长连接断掉。**
+  // 原来只清定时器、不关连接：/stream.mjpg 仍然返回 200 但永远不再出帧，
+  // 悬浮窗那边读到的是「连接正常但没帧」→ 永远发现不了 running:false，
+  // 窗口冻在最后一帧，只有 120 秒的 idle shutdown 才收场。
+  // 断掉之后悬浮窗会走进回退轮询，立刻看到 running:false 并自己退出。
+  try {
+    for (const v of st.viewers) {
+      try { v.end(); } catch { /* ignore */ }
+    }
+    st.viewers.clear();
+  } catch { /* ignore */ }
   st.latest = null;
+  st.marks = [];        // 顺手清掉点击标记，避免下一轮还挂着上一轮的十字
   await writeState();
   return { ok: true };
 }

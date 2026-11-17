@@ -185,8 +185,23 @@ public class Main {
                 buf.get(row, 0, w * 4);
                 all.write(row, 0, w * 4);
             }
+            // **必须手动转 RGBA→ARGB 并强制 alpha=255。**
+            // ImageReader 给的是 RGBA_8888（内存序 R,G,B,A），而 Bitmap 的
+            // ARGB_8888 走 copyPixelsFromBuffer 时按 ARGB 解释 —— alpha 位拿到的是
+            // blue 通道值，常常是 0 → 全透明 → JPEG 编码出来全黑。
+            // 实测症状：159 帧全是亮度 1.0 的黑图。
+            byte[] raw = all.toByteArray();
+            int n = w * h;
+            int[] argb = new int[n];
+            for (int i = 0; i < n; i++) {
+                int o = i * 4;
+                int r = raw[o] & 0xff;
+                int g = raw[o + 1] & 0xff;
+                int b = raw[o + 2] & 0xff;
+                argb[i] = (0xff << 24) | (r << 16) | (g << 8) | b;   // 强制不透明
+            }
             Bitmap bm = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-            bm.copyPixelsFromBuffer(ByteBuffer.wrap(all.toByteArray()));
+            bm.setPixels(argb, 0, w, 0, 0, w, h);
             byte[] out = null;
             if (w > outWidth) {
                 int nh = h * outWidth / w;

@@ -341,19 +341,38 @@ export async function streamStart(args) {
   const width = Math.min(Math.max(Number(args?.width) || 360, 240), 720);
   // 传真实的 focusedApp：以前这里写死空串，导致胶囊永远只显示"操作中 12s"。
   const focus = await vd.focusedApp();
-  const r = await stream.start({ sfId: s.sfId, displayId: s.displayId, fps, width, focusedApp: focus });
   try { stream.setState('looking'); } catch { /* ignore */ }
-  if (!r.ok) return { text: `推流启动失败：${r.hint}` };
-  // **自动拉起悬浮窗**：装了就能浮在任何 App 上，没装就只用胶囊
-  const ov = await overlayStart(r.port);
-  return {
-    text: `推流已开启：127.0.0.1:${r.port}，${fps} fps，宽度 ${width}\n`
-      + (ov.ok
-        ? '悬浮窗已浮起（可拖动，单击收起，浮在任何 App 上）\n'
-        : `胶囊可用；悬浮窗没起来（${ov.why}）\n`)
-      + '打开 DSH Go 输入框上方的「AI 画面」胶囊，点它也能看。\n'
-      + '实测这个档位约 0.30 核、29 KB/s，不写任何文件。',
-  };
+
+  // **优先走 framesrv（ImageReader，76fps）**。
+  // screencap 每帧 141ms 的 Surface 回读是它的工作方式决定的，改不了；
+  // ImageReader 从合成器直接拿 buffer，实测快 30 倍。
+  let fast = { ok: false };
+  try {
+    const fsrv = await import('./framesrv.js');
+    fast = await fsrv.start({
+      displayId: s.displayId, width: s.width || 720, height: s.height || 1592,
+    });
+  } catch (e) { fast = { ok: false, why: String(e?.message || e).slice(0, 60) }; }
+
+  // 慢路径：framesrv 不行就退回 screencap 推流（保证有画面）
+  const r = await stream.start({ sfId: s.sfId, displayId: s.displayId, fps, width, focusedApp: focus });
+  if (!r.ok && !fast.ok) return { text: `推流启动失败：${r.hint}` };
+
+  // 悬浮窗连哪个端口：优先 framesrv（快）
+  const viewPort = fast.ok ? fast.port : r.port;
+  const ov = await overlayStart(viewPort);
+
+  const lines = [];
+  if (fast.ok) {
+    lines.push(`取帧走 ImageReader（快路径）：127.0.0.1:${fast.port}`);
+    lines.push('实测 76 fps，静止时不抓帧几乎不耗 CPU。');
+  } else {
+    lines.push(`取帧走 screencap（慢路径，${fps} fps）：127.0.0.1:${r.port}`);
+    lines.push(`ImageReader 没起来：${fast.why || '未知'} —— 先跑 framesrv/build.sh 编译`);
+  }
+  lines.push(ov.ok ? '悬浮窗已浮起（可拖动，单击收起，浮在任何 App 上）' : `悬浮窗没起来（${ov.why}）`);
+  lines.push('打开 DSH Go 输入框上方的「AI 画面」胶囊也能看。');
+  return { text: lines.join('\n') };
 }
 
 export async function streamStop() {

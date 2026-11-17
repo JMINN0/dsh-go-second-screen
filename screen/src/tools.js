@@ -283,7 +283,7 @@ async function overlayStop() {
 export async function streamStart(args) {
   const s = await vd.start();
   if (!s.ok) return { text: `建屏失败：${s.hint}` };
-  const fps = Math.min(Math.max(Number(args?.fps) || 2, 1), 4);
+  const fps = Math.min(Math.max(Number(args?.fps) || 2, 1), 15);   // 上限 15（原来 4 是桥接遗留）
   const width = Math.min(Math.max(Number(args?.width) || 360, 240), 720);
   // 传真实的 focusedApp：以前这里写死空串，导致胶囊永远只显示"操作中 12s"。
   const focus = await vd.focusedApp();

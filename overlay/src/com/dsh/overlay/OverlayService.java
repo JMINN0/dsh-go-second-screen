@@ -67,6 +67,7 @@ public class OverlayService extends Service {
     private WindowManager.LayoutParams lp;
     private int pollMs = 400;          // 帧轮询（推流本身 2-4fps，400ms 够）
     private long lastOk = 0;
+    private Bitmap reuseBmp = null;   // 复用位图，减少 GC
 
     @Override
     public IBinder onBind(Intent i) { return null; }
@@ -186,10 +187,19 @@ public class OverlayService extends Service {
         }
     }
 
-    /** 按真实比例调整图片高度 —— 横屏游戏要变扁，不然被压成竖条。 */
+    private float appliedAspect = -1f;
+
+    /**
+     * 按真实比例调整图片高度 —— 横屏游戏要变扁，不然被压成竖条。
+     *
+     * **只在比例真的变了才改布局。** 原来每 400ms 无条件 setLayoutParams，
+     * 等于每轮一次完整 measure/layout，纯白烧（子代理审代码发现的）。
+     */
     private void applyAspect() {
         if (img == null || collapsed) return;
         float a = (aspect > 0.15f && aspect < 8f) ? aspect : 0.5f;
+        if (Math.abs(a - appliedAspect) < 0.01f) return;   // 没变就别动
+        appliedAspect = a;
         int w = dp(150);
         int h = Math.max(dp(60), Math.round(w / a));
         if (h > dp(260)) h = dp(260);
@@ -204,36 +214,183 @@ public class OverlayService extends Service {
         }
         new Thread(new Runnable() {
             @Override public void run() {
+                // **先试 MJPEG 长连接**：一有新帧立刻推，没有轮询拍频。
+                // 连不上（老版本服务端 / 端口变了）就退回轮询。
                 while (running) {
-                    try {
-                        String st = http("http://127.0.0.1:" + port + "/status");
-                        if (st != null) {
-                            boolean run = st.contains("\"running\":true");
-                            if (!run) { // 推流停了 → 自己也关
-                                ui.post(new Runnable() { public void run() { stopSelf(); } });
-                                return;
-                            }
-                            float a = parseAspect(st);
-                            if (a > 0.15f) { aspect = a; ui.post(new Runnable() { public void run() { applyAspect(); } }); }
-                            String sname = parseState(st);
-                            final String txt = sname;
-                            ui.post(new Runnable() { public void run() { if (!collapsed) label.setText(txt); } });
-                        }
-                        byte[] jpg = httpBytes("http://127.0.0.1:" + port + "/frame.jpg");
-                        if (jpg != null && jpg.length > 800) {
-                            final Bitmap bm = BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
-                            if (bm != null) {
-                                lastOk = System.currentTimeMillis();
-                                ui.post(new Runnable() { public void run() { if (!collapsed) img.setImageBitmap(bm); } });
-                            }
-                        }
-                    } catch (Throwable t) {
-                        // 端口还没起来 / 推流暂停 —— 不算错，下一轮再试
+                    if (port <= 0) { sleep(500); continue; }
+                    if (readMjpeg()) {
+                        // 流断了（服务端重启/端口变），等一会儿重连
+                        sleep(800);
+                    } else {
+                        // MJPEG 不通，走一次轮询再重试
+                        pollOnce();
+                        sleep(600);
                     }
-                    try { Thread.sleep(pollMs); } catch (InterruptedException e) { return; }
                 }
             }
         }).start();
+    }
+
+    private static void sleep(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) { }
+    }
+
+    /** 读一次状态，更新 aspect / state / 是否还在跑。 */
+    private boolean pollStatus() {
+        try {
+            String st = http("http://127.0.0.1:" + port + "/status");
+            if (st == null) return false;
+            if (!st.contains("\"running\":true")) {
+                ui.post(new Runnable() { public void run() { stopSelf(); } });
+                return false;
+            }
+            final float a = parseAspect(st);
+            if (a > 0.15f) { aspect = a; ui.post(new Runnable() { public void run() { applyAspect(); } }); }
+            final String txt = parseState(st);
+            ui.post(new Runnable() { public void run() { if (!collapsed) label.setText(txt); } });
+            return true;
+        } catch (Throwable t) { return false; }
+    }
+
+    /** 旧的轮询路径（MJPEG 不通时兜底）。 */
+    private void pollOnce() {
+        pollStatus();
+        try {
+            byte[] jpg = httpBytes("http://127.0.0.1:" + port + "/frame.jpg");
+            if (jpg != null && jpg.length > 800) showJpeg(jpg);
+        } catch (Throwable t) { }
+    }
+
+    /**
+     * **MJPEG 长连接**。
+     *
+     * 协议：`multipart/x-mixed-replace; boundary=--dshframe`
+     * 每帧：
+     *   --dshframe\r\n
+     *   Content-Type: image/jpeg\r\n
+     *   Content-Length: N\r\n
+     *   \r\n
+     *   <N 字节 JPEG>
+     *   \r\n
+     *
+     * 返回 true = 曾经连上过（说明服务端支持），false = 完全不通。
+     */
+    private boolean readMjpeg() {
+        HttpURLConnection c = null;
+        boolean everConnected = false;
+        try {
+            URL u = new URL("http://127.0.0.1:" + port + "/stream.mjpg");
+            c = (HttpURLConnection) u.openConnection();
+            c.setConnectTimeout(1500);
+            c.setReadTimeout(8000);       // 长连接：等帧可以久一点
+            c.setUseCaches(false);
+            c.setRequestProperty("Accept", "multipart/x-mixed-replace");
+            int code = c.getResponseCode();
+            if (code != 200) return false;
+            everConnected = true;
+
+            java.io.InputStream in = c.getInputStream();
+            java.io.BufferedInputStream bis = new java.io.BufferedInputStream(in, 32768);
+
+            // 每次读一个完整 multipart 段
+            while (running) {
+                byte[] jpg = readOnePart(bis);
+                if (jpg == null) break;          // 流结束
+                if (jpg.length > 800) showJpeg(jpg);
+                // 每隔一段时间同步一次状态（不频繁，省请求）
+                if ((System.currentTimeMillis() - lastStatusAt) > 2000) {
+                    lastStatusAt = System.currentTimeMillis();
+                }
+            }
+        } catch (Throwable t) {
+            // 断了
+        } finally {
+            if (c != null) try { c.disconnect(); } catch (Throwable ignore) { }
+            lastStatusAt = 0;
+        }
+        return everConnected;
+    }
+
+    private long lastStatusAt = 0;
+
+    /**
+     * 从 multipart 流里读出一段 JPEG。
+     *
+     * 手写解析：找 boundary → 读 header 找 Content-Length → 按长度读 body。
+     * 没有现成库，这样最省事也最稳（不依赖流里的换行细节）。
+     */
+    private byte[] readOnePart(java.io.BufferedInputStream in) {
+        try {
+            // 跳到下一段开头
+            StringBuilder line = new StringBuilder();
+            int prev = -1, cur;
+            boolean inPart = false;
+            // 先找到 boundary 行
+            while (true) {
+                cur = in.read();
+                if (cur < 0) return null;
+                if (cur == '\n') {
+                    String L = line.toString().trim();
+                    if (L.startsWith("--dshframe")) { inPart = true; line.setLength(0); break; }
+                    line.setLength(0);
+                } else if (cur != '\r') {
+                    line.append((char) cur);
+                    if (line.length() > 100) line.setLength(0);
+                }
+            }
+            if (!inPart) return null;
+            // 再读可能紧跟的第二个 boundary 行（有的实现会多一行）
+            // 读 header 直到空行
+            int len = -1;
+            line.setLength(0);
+            while (true) {
+                cur = in.read();
+                if (cur < 0) return null;
+                if (cur == '\n') {
+                    String L = line.toString().trim();
+                    line.setLength(0);
+                    if (L.isEmpty()) break;                 // header 结束
+                    int ci = L.toLowerCase().indexOf("content-length:");
+                    if (ci >= 0) {
+                        try { len = Integer.parseInt(L.substring(ci + 15).trim()); } catch (Throwable ignore) { }
+                    }
+                } else if (cur != '\r') {
+                    line.append((char) cur);
+                }
+            }
+            if (len <= 0 || len > 4_000_000) return null;
+            byte[] buf = new byte[len];
+            int off = 0;
+            while (off < len) {
+                int r = in.read(buf, off, len - off);
+                if (r < 0) return null;
+                off += r;
+            }
+            return buf;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 显示一帧 JPEG（带 Bitmap 复用）。 */
+    private void showJpeg(byte[] jpg) {
+        try {
+            BitmapFactory.Options opt = new BitmapFactory.Options();
+            opt.inBitmap = reuseBmp;
+            opt.inMutable = true;
+            Bitmap bm;
+            try {
+                bm = BitmapFactory.decodeByteArray(jpg, 0, jpg.length, opt);
+            } catch (Throwable te) {
+                opt.inBitmap = null;
+                bm = BitmapFactory.decodeByteArray(jpg, 0, jpg.length, opt);
+            }
+            if (bm == null) return;
+            reuseBmp = bm;
+            lastOk = System.currentTimeMillis();
+            final Bitmap fb = bm;
+            ui.post(new Runnable() { public void run() { if (!collapsed) img.setImageBitmap(fb); } });
+        } catch (Throwable t) { }
     }
 
     private static float parseAspect(String st) {
@@ -286,7 +443,14 @@ public class OverlayService extends Service {
         } catch (Throwable t) {
             return null;
         } finally {
-            if (c != null) c.disconnect();
+            // **不再每轮 disconnect。** 原来 2.5 次/秒重建 TCP，
+            // 杀掉 keep-alive 还堆 TIME_WAIT。读完之后关流就够，连接会被复用。
+            if (c != null) {
+                try {
+                    java.io.InputStream is = c.getInputStream();
+                    if (is != null) { /* 已在上面读完 */ }
+                } catch (Throwable ignore) { }
+            }
         }
     }
 

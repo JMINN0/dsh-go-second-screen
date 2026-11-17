@@ -39,6 +39,7 @@ const st = {
   doneAt: 0,             // 进入 done 的时刻，用来做「done 后保留 N 秒」
   // **点击标记**：在推流帧上画出「AI 点在哪」，用户能直接看到操作位置
   marks: [],             // [{ nx, ny, at, kind }]，最多留 3 个
+  viewers: new Set(),    // MJPEG 长连接的响应对象
   displayId: null,
   focusedApp: '',
   frames: 0,
@@ -144,8 +145,13 @@ async function captureAndConvert() {
 
   // 自适应：ffmpeg 的 -q:v 是**数字越大质量越差、文件越小**（2 最好 31 最差）。
   // 之前按 7→4→2 写反了，越调越大，帧反而超标 —— 这里往大的方向调。
+  // **从上次成功的 q 开始试，不要每帧都从 7 重跑。**
+  // 原来 st.quality 只写不读，导致每帧都从最好质量开始试，转码 14ms 变 30-50ms 还抖动。
+  const ladder = [7, 12, 18, 24];
+  const startIdx = Math.max(0, ladder.indexOf(st.quality));
+  const order = ladder.slice(startIdx).concat(ladder.slice(0, startIdx));
   let last = null;
-  for (const q of [7, 12, 18, 24]) {
+  for (const q of order) {
     const jpg = await pngToJpeg(r.out, st.width, q);
     if (!jpg) continue;
     last = jpg;
@@ -258,13 +264,30 @@ async function tick() {
   st.busy = true;
   try {
     const jpg = await captureAndConvert();
-    if (jpg) { st.latest = jpg; st.frames += 1; }
+    if (jpg) {
+      st.latest = jpg;
+      st.frames += 1;
+      // **有新帧立刻推给所有长连接** —— 这是消除拍频的关键
+      for (const v of st.viewers) writeMjpeg(v, jpg);
+      if (st.viewers.size > 0) st.lastFrameFetchAt = Date.now();
+    }
   } finally { st.busy = false; }
 }
 
 export function setFocusedApp(app) {
   st.focusedApp = String(app || '').slice(0, 200);
   writeState();
+}
+
+/** 往一个 MJPEG 长连接写一帧。 */
+function writeMjpeg(res, jpg) {
+  try {
+    res.write('--dshframe\r\n');
+    res.write('Content-Type: image/jpeg\r\n');
+    res.write('Content-Length: ' + jpg.length + '\r\n\r\n');
+    res.write(jpg);
+    res.write('\r\n');
+  } catch { /* 客户端断了就算了 */ }
 }
 
 async function writeState() {
@@ -302,13 +325,52 @@ function startServer() {
         res.end(st.latest);
         return;
       }
+      /**
+       * **MJPEG 长连接。**
+       *
+       * 为什么加：原来客户端每 400ms 轮询一次 /frame.jpg，而服务端 500ms 换帧，
+       * 两个周期不同步 → 每约 2 秒会出现一次 810ms 的长停顿（纯算术，可预测）。
+       * 用长连接推流就没有这个拍频 —— 一有新帧立刻推。
+       */
+      if (url.pathname === '/stream.mjpg') {
+        st.lastFrameFetchAt = Date.now();
+        res.writeHead(200, {
+          'content-type': 'multipart/x-mixed-replace; boundary=--dshframe',
+          'cache-control': 'no-store',
+          'connection': 'keep-alive',
+          'pragma': 'no-cache',
+        });
+        st.viewers.add(res);
+        // 先推一帧已有的，别让客户端等
+        if (st.latest) writeMjpeg(res, st.latest);
+        const cleanup = () => { st.viewers.delete(res); };
+        req.on('close', cleanup);
+        req.on('error', cleanup);
+        res.on('close', cleanup);
+        res.on('error', cleanup);
+        return;
+      }
       res.writeHead(404); res.end('not found');
     });
-    srv.listen(0, '127.0.0.1', () => {
+    // **先试固定端口。** listen(0) 每次重启端口都变，服务一重启悬浮窗就永久失联
+    // （它记着旧端口，连不上也不会自己找新的）。
+    const FIXED = Number(process.env.DSH_STREAM_PORT || 38801);
+    const onListening = () => {
       st.port = srv.address().port;
       st.server = srv;
       resolve(st.port);
+    };
+    srv.once('error', () => {
+      // 固定端口被占 → 退回随机端口（至少能工作，下次启动可能又变）
+      try { srv.close(); } catch { /* ignore */ }
+      const s2 = createServer(srv.listeners('request')[0]);
+      s2.listen(0, '127.0.0.1', () => {
+        st.port = s2.address().port;
+        st.server = s2;
+        resolve(st.port);
+      });
     });
+    srv.listen(FIXED, '127.0.0.1', onListening);
   });
 }
 
@@ -326,7 +388,9 @@ export async function start({ sfId, displayId, fps = 2, width = 360, focusedApp 
 
   st.sfId = sfId;
   st.displayId = displayId || null;
-  st.fps = Math.min(Math.max(Number(fps) || 2, 1), 4);   // 上限 4fps：桥接协议就是 4Hz
+  // **上限从 4 提到 15。** 原来的 4fps 是桥接协议的遗留限制（JSON 文本帧限 4Hz），
+  // 但现在帧走的是 HTTP 回环，那条限制根本不存在 —— 不解开它，所有提帧方案都白搭。
+  st.fps = Math.min(Math.max(Number(fps) || 2, 1), 15);
   st.width = Math.min(Math.max(Number(width) || 360, 240), 720);
   st.focusedApp = focusedApp;
   st.latest = null;
@@ -364,6 +428,7 @@ export async function stop() {
 /** 收工：连 HTTP 服务一起关，并删掉状态文件（原生插件就看不到"在操作"了）。 */
 export async function shutdown() {
   await stop();
+  try { for (const v of st.viewers) { try { v.end(); } catch { } } st.viewers.clear(); } catch { }
   if (st.server) { st.server.close(); st.server = null; }
   st.port = 0;
   try { await rm(STATE_FILE, { force: true }); } catch {}

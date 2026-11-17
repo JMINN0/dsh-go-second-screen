@@ -18,15 +18,14 @@
         android:allowBackup="false"
         android:usesCleartextTraffic="true">
 
+        <!-- 故意不加 LAUNCHER intent-filter，这样它不会出现在桌面和应用列表里。
+             启动方式只有 adb shell am start（参数用 ei port 传端口），
+             插件会自动这样做，用户不需要手动启动。 -->
         <activity android:name=".MainActivity"
             android:exported="true"
             android:excludeFromRecents="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service android:name=".OverlayService"
             android:exported="false" />

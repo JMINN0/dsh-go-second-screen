@@ -197,7 +197,7 @@ export function streamStartSpec() {
     description: [
       '把虚拟屏的画面以低帧率 JPEG 推给 DSH Go 的「AI 画面」胶囊，用户点它就能实时看到 AI 在操作什么。',
       '',
-      '实测成本：360x640 @2fps 约 0.30 核、29 KB/s，全程不写任何文件。帧率上限 4fps（桥接协议硬限）。',
+      '实测成本：360x640 @2fps 约 0.30 核、29 KB/s，全程不写任何文件。帧率上限 15fps。',
       '不看的时候胶囊不显示画面；调 vdisplay_stream_stop 或 vdisplay_stop 就会完全停掉。',
     ].join('\n'),
     parameters: {

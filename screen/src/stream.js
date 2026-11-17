@@ -68,7 +68,7 @@ function runCollect(cmd, args) {
  */
 function pngToJpeg(png, width, q = 7) {
   // **点击标记画在缩放之后**，这样坐标直接是输出空间的，不用反算原图尺寸。
-  const marks = marksToFilters();
+  const marks = marksToFilters(width);   // **传本次宽度**，缩窄回退时才不会画错位置
   const vf = marks
     ? `scale=${width}:-1:flags=bilinear,${marks}`
     : `scale=${width}:-1:flags=bilinear`;
@@ -197,36 +197,60 @@ export function markTap(nx, ny, kind = 'tap') {
   const x = Number(nx), y = Number(ny);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return;
   if (x < 0 || x > 1 || y < 0 || y > 1) return;
-  st.marks.push({ nx: x, ny: y, at: Date.now(), kind: String(kind).slice(0, 8) });
+  // **去重**：新点落在旧点 6% 宽度内就当同一次点击，替换而不是新增
+  // （否则密集点击会糊成一团，分不清哪次是刚发生的）
+  const near = st.marks.findIndex(m =>
+    Math.abs(m.nx - x) < 0.06 && Math.abs(m.ny - y) < 0.06);
+  const rec = { nx: x, ny: y, at: Date.now(), kind: String(kind).slice(0, 8) };
+  if (near >= 0) st.marks.splice(near, 1);
+  st.marks.push(rec);
   if (st.marks.length > 3) st.marks.shift();
   st.lastActivityAt = Date.now();
 }
 
-/** 把 marks 变成 ffmpeg 滤镜串（画在缩放之后的坐标系里）。 */
-function marksToFilters() {
+/**
+ * 把 marks 变成 ffmpeg 滤镜串（画在缩放之后的坐标系里）。
+ *
+ * **必须传 width**：因为 pngToJpeg 在 JPEG 仍超标时会用 0.7 倍宽度再转一次
+ * （见下面的 narrower 回退），如果这里还按 st.width 算坐标，标记会横向偏 1.43 倍
+ * 直接被推出画面。子代理审代码时发现的。
+ */
+function marksToFilters(width) {
   const now = Date.now();
-  // 只画 5 秒内的，太老的淡出（否则画面上一堆历史点看不清）
-  const live = st.marks.filter(m => (now - m.at) < 5000);
+  // **最新的永远留着，旧的按时间淡出。**
+  // 原来一律 5 秒硬消失，一个每 20 秒瞄一眼的用户正好错过（变化盲视），
+  // 事后完全不知道刚才点过哪。现在：最新那个降到 0.35 常驻，state 变 done/idle 才撤。
+  const live = st.marks.filter(m => (now - m.at) < 60000);
   if (!live.length) return '';
-  const W = st.width || 360;
+  const W = width || st.width || 360;
   const parts = [];
-  for (const m of live) {
-    const age = (now - m.at) / 5000;              // 0 = 刚点，1 = 5 秒前
-    const alpha = Math.max(0.25, 1 - age).toFixed(2);
+  const newest = live[live.length - 1];
+  live.forEach((m, i) => {
+    const ageSec = (now - m.at) / 1000;
+    const isNewest = (m === newest);
+    // 透明度：最新 1.0 → 2s 后降到 0.35 常驻；旧的 ×0.5 更淡
+    let alpha;
+    if (isNewest) alpha = ageSec < 2 ? 1.0 : 0.35;
+    else alpha = 0.22;
+    // **新旧尺寸区分**：最新满血，旧的缩到 70%
+    const scale = isNewest ? 1.0 : 0.7;
     const cx = Math.round(m.nx * W);
-    // 高度按 aspect 推（不知道输出高度时用宽度/aspect 估；aspect 没有就按 9:19.5 估）
     const a = (st.aspect > 0.1 && st.aspect < 10) ? st.aspect : 0.5;
     const H = Math.round(W / a);
     const cy = Math.round(m.ny * H);
-    const arm = Math.max(6, Math.round(W * 0.022));   // 十字臂长
-    const t = Math.max(2, Math.round(W * 0.005));     // 线宽
-    // 横线 + 竖线 = 十字
-    parts.push(`drawbox=x=${cx - arm}:y=${cy - t}:w=${arm * 2}:h=${t * 2}:color=red@${alpha}:t=fill`);
-    parts.push(`drawbox=x=${cx - t}:y=${cy - arm}:w=${t * 2}:h=${arm * 2}:color=red@${alpha}:t=fill`);
-    // 外圈空心方块，更容易看见
-    const box = arm * 2;
-    parts.push(`drawbox=x=${cx - box}:y=${cy - box}:w=${box * 2}:h=${box * 2}:color=red@${alpha}:t=${t}`);
-  }
+    // **线宽至少 3px**：原来 max(2, W*0.005)=2px，在 150dp 悬浮窗里只有 0.83dp，
+    // 低于 1dp 会被重采样吃掉一半亮度 —— 这是「看不清」的真正原因，不是分辨率问题。
+    const t = Math.max(3, Math.round(W * 0.008 * scale));
+    const arm = Math.max(9, Math.round(W * 0.028 * scale));
+    const box = Math.max(18, Math.round(W * 0.055 * scale));
+    // 外框：先垫一层黑边，深浅背景都看得清
+    parts.push(`drawbox=x=${cx - box - 1}:y=${cy - box - 1}:w=${(box + 1) * 2}:h=${(box + 1) * 2}:color=black@${(alpha * 0.5).toFixed(2)}:t=1`);
+    // 十字
+    parts.push(`drawbox=x=${cx - arm}:y=${cy - t}:w=${arm * 2}:h=${t * 2}:color=0xFF2D2D@${alpha.toFixed(2)}:t=fill`);
+    parts.push(`drawbox=x=${cx - t}:y=${cy - arm}:w=${t * 2}:h=${arm * 2}:color=0xFF2D2D@${alpha.toFixed(2)}:t=fill`);
+    // 空心外框
+    parts.push(`drawbox=x=${cx - box}:y=${cy - box}:w=${box * 2}:h=${box * 2}:color=0xFF2D2D@${alpha.toFixed(2)}:t=${t}`);
+  });
   return parts.join(',');
 }
 

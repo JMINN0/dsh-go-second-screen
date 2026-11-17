@@ -69,6 +69,13 @@ public class OverlayService extends Service {
     private long lastOk = 0;
     private Bitmap reuseBmp = null;   // 复用位图，减少 GC
 
+    // **用户可自定义大小**（需求：能拖拽改大小，且不影响里面的 AI 操作）
+    //
+    // 为什么改大小不影响 AI：AI 操作的是**虚拟屏**（720×1592 不变），
+    // 悬浮窗只是把画面缩放着显示。改的只是显示尺寸，不碰虚拟屏。
+    private int userW = 0;            // 0 = 用默认值
+    private int userH = 0;
+
     @Override
     public IBinder onBind(Intent i) { return null; }
 
@@ -138,6 +145,38 @@ public class OverlayService extends Service {
         lp.x = dp(12);
         lp.y = dp(120);
 
+        // **右下角缩放手柄**：拖动它改大小，不碰画面本身
+        final View handle = new View(this);
+        GradientDrawable hbg = new GradientDrawable();
+        hbg.setColor(0x88FFFFFF);
+        hbg.setCornerRadius(dp(4));
+        handle.setBackground(hbg);
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(dp(18), dp(18));
+        hlp.gravity = Gravity.END;
+        box.addView(handle, hlp);
+        handle.setOnTouchListener(new View.OnTouchListener() {
+            float downX, downY;
+            int startW, startH;
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        downX = e.getRawX(); downY = e.getRawY();
+                        startW = img.getWidth() > 0 ? img.getWidth() : dp(150);
+                        startH = img.getHeight() > 0 ? img.getHeight() : dp(150);
+                        return true;
+                    case MotionEvent.ACTION_MOVE:
+                        int nw = Math.max(dp(80), startW + (int)(e.getRawX() - downX));
+                        int nh = Math.max(dp(60), startH + (int)(e.getRawY() - downY));
+                        userW = nw; userH = nh;
+                        img.setLayoutParams(new LinearLayout.LayoutParams(nw, nh));
+                        return true;
+                    case MotionEvent.ACTION_UP:
+                        return true;
+                }
+                return false;
+            }
+        });
+
         root.setOnTouchListener(new View.OnTouchListener() {
             float downX, downY;
             int startX, startY;
@@ -200,6 +239,11 @@ public class OverlayService extends Service {
         float a = (aspect > 0.15f && aspect < 8f) ? aspect : 0.5f;
         if (Math.abs(a - appliedAspect) < 0.01f) return;   // 没变就别动
         appliedAspect = a;
+        // **用户手动设过大小就听用户的，不要按比例覆盖**
+        if (userW > 0) {
+            img.setLayoutParams(new LinearLayout.LayoutParams(userW, userH));
+            return;
+        }
         int w = dp(150);
         int h = Math.max(dp(60), Math.round(w / a));
         if (h > dp(260)) h = dp(260);

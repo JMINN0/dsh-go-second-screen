@@ -245,23 +245,77 @@ const OVERLAY_PKG = 'com.dsh.overlay';
  *
  * APK 不在就静默跳过：胶囊仍然能用，只是没有跨 App 的悬浮窗。
  */
+/**
+ * 确保悬浮窗 APK 装好 —— **用户不需要手动装**。
+ *
+ * ## 为什么必须装 APK（实测过，不是偷懒）
+ *
+ * `app_process` 画不了悬浮窗：`WindowManagerService.openSession` 建的 `Session`
+ * 要求调用进程在 ActivityManager 的进程表里，而 app_process 从 adb shell 起、
+ * 不是 zygote fork 的应用进程 → `Unknown pid` 直接拒绝。
+ * 探针代码在 `probe/src/com/dsh/probe/OverlayProbe.java`，结论在
+ * `tests/NO-APK-OVERLAY-PROBE.md`。
+ *
+ * ## 怎么做到用户无感
+ *
+ * APK 就在插件包里（`assets/overlay/ai-overlay.apk`）。
+ * 第一次用悬浮窗时自动 push + install + 授权，用户什么都不用做。
+ */
+async function ensureOverlayInstalled(run, target) {
+  // 已装就直接返回
+  try {
+    const { stdout } = await run('adb', ['-s', target, 'shell',
+      `pm list packages ${OVERLAY_PKG}`], { timeout: 8000 });
+    if (String(stdout || '').includes(OVERLAY_PKG)) return { ok: true, already: true };
+  } catch { /* 查不到就当没装，继续试装 */ }
+
+  // 找内置 APK
+  const { existsSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { dirname, join } = await import('node:path');
+  let apk = null;
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const rel of ['../assets/overlay/ai-overlay.apk', './assets/overlay/ai-overlay.apk']) {
+      const p = join(here, rel);
+      if (existsSync(p)) { apk = p; break; }
+    }
+  } catch { /* ignore */ }
+  if (!apk) return { ok: false, why: '找不到内置 APK（assets/overlay/ai-overlay.apk）' };
+
+  // **直接用本地路径装，不要 push 后再装。**
+  // 实测：`adb install <设备路径>` 会走 Incremental Install，报
+  // "failed to stat ... No such file or directory"，装不上；
+  // 给本地路径则是 Streamed Install，正常。
+  try {
+    const r = await run('adb', ['-s', target, 'install', '-r', apk], { timeout: 90000 });
+    const out = String(r.stdout || '') + String(r.stderr || '');
+    if (!/Success/i.test(out)) return { ok: false, why: 'install 失败: ' + out.slice(0, 120) };
+    // 给悬浮窗权限（不用用户手点）
+    await run('adb', ['-s', target, 'shell',
+      `appops set ${OVERLAY_PKG} SYSTEM_ALERT_WINDOW allow`], { timeout: 8000 }).catch(() => {});
+    return { ok: true, already: false };
+  } catch (e) {
+    return { ok: false, why: String(e?.message || e).slice(0, 80) };
+  }
+}
+
 async function overlayStart(port) {
   try {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const run = promisify(execFile);
     const target = await adbTarget();
-    // 先看装没装
-    const { stdout } = await run('adb', ['-s', target, 'shell',
-      `pm list packages ${OVERLAY_PKG}`], { timeout: 8000 });
-    if (!String(stdout || '').includes(OVERLAY_PKG)) return { ok: false, why: '没装' };
+    // **装不上就自动装**（用户无感）
+    const inst = await ensureOverlayInstalled(run, target);
+    if (!inst.ok) return { ok: false, why: inst.why };
     // 给权限（幂等，已给过也不报错）
     await run('adb', ['-s', target, 'shell',
       `appops set ${OVERLAY_PKG} SYSTEM_ALERT_WINDOW allow`], { timeout: 8000 }).catch(() => {});
     // 拉起并把端口传进去
     await run('adb', ['-s', target, 'shell',
       `am start -n ${OVERLAY_PKG}/.MainActivity --ei port ${port}`], { timeout: 8000 });
-    return { ok: true };
+    return { ok: true, autoInstalled: inst.already === false };
   } catch (e) {
     return { ok: false, why: String(e?.message || e).slice(0, 60) };
   }

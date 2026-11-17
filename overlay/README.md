@@ -2,7 +2,40 @@
 
 **浮在任何 App 上面的 AI 操作画面** —— 像 DSH Go 的小鲸鱼娘那样，但显示的是虚拟屏内容。
 
-## 为什么必须是独立 APK
+## 零门槛：用户不用手动装
+
+**APK 就在插件包里**（`screen/assets/overlay/ai-overlay.apk`）。
+第一次用悬浮窗时插件自动：push → install → 授权 → 启动。用户无感。
+
+实测（先卸载模拟新用户，然后只调 `vdisplay_stream`）：
+```
+耗时 1094ms（含自动安装）
+    推流已开启：127.0.0.1:38801，5 fps
+    悬浮窗已浮起（可拖动，单击收起，浮在任何 App 上）
+自动装: ✅   悬浮窗: 4 个 ✅
+```
+
+**所以别人 clone 仓库、装插件，就能直接用悬浮窗，不需要单独下任何东西。**
+
+## 为什么必须是独立 APK（查过了，绕不过去）
+
+用户问过「为什么单独做成一个软件，内置在插件里不行吗」。
+查了：**`app_process` 画不了悬浮窗**，探针实测（`tests/NO-APK-OVERLAY-PROBE.md`）：
+
+```
+CTX_OK via=systemMain.mSystemContext pkg=android   ✅ Context 拿到了
+WM_OK true class=android.view.WindowManagerImpl    ✅ WindowManager 拿到了
+ADDVIEW_ERR IllegalStateException: Unknown pid=19074 uid=2000
+  at com.android.server.wm.Session.<init>(Session.java:161)
+```
+
+`WindowManagerService.openSession()` 建 `Session` 时要求调用进程在 ActivityManager 的进程表里。
+`app_process` 从 adb shell 起、不是 zygote fork 的应用进程 → `Unknown pid` → 拒绝。
+
+**这不是权限问题**（shell 本来就有 `SYSTEM_ALERT_WINDOW: granted=true`），
+是**进程身份**问题。装 APK 绕不过去，但可以让用户完全无感。
+
+## 原方案：为什么必须是独立 APK
 
 插件跑在 proot 的 Node 里，画不了 Android 窗口。
 要浮在别的 App 上，必须有 `SYSTEM_ALERT_WINDOW` 权限的**安装包**。

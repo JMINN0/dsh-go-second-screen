@@ -73,6 +73,7 @@ public class OverlayService extends Service {
     //
     // 为什么改大小不影响 AI：AI 操作的是**虚拟屏**（720×1592 不变），
     // 悬浮窗只是把画面缩放着显示。改的只是显示尺寸，不碰虚拟屏。
+    private boolean hidden = false;   // 用户点了隐藏
     private int userW = 0;            // 0 = 用默认值
     private int userH = 0;
 
@@ -92,6 +93,7 @@ public class OverlayService extends Service {
         if (it != null) {
             int p = it.getIntExtra("port", 0);
             if (p > 0 && p != port) { port = p; }
+            if (it.getBooleanExtra("unhide", false)) { unhide(); }
         }
         if (root == null) {
             show();
@@ -113,10 +115,46 @@ public class OverlayService extends Service {
         box.setBackground(bg);
         box.setPadding(dp(3), dp(3), dp(3), dp(3));
 
+        // **顶部工具条**：一个「✕」隐藏按钮 + 一个「—」收起按钮
+        // 用户提的「还不能隐藏？」—— 现在能了。
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        TextView hideBtn = new TextView(this);
+        hideBtn.setText("✕");
+        hideBtn.setTextColor(0xCCFFFFFF);
+        hideBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        hideBtn.setPadding(dp(8), 0, dp(8), 0);
+        hideBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                // 隐藏窗口但**不退出服务** —— 通知里点一下就能叫回来
+                if (root != null) { root.setVisibility(View.GONE); root.setTag("hidden"); }
+                hidden = true;
+                postNotification("已隐藏，点这里恢复");
+            }
+        });
+        bar.addView(hideBtn);
+        TextView foldBtn = new TextView(this);
+        foldBtn.setText("—");
+        foldBtn.setTextColor(0xCCFFFFFF);
+        foldBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        foldBtn.setPadding(dp(8), 0, dp(8), 0);
+        foldBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { toggle(); }
+        });
+        bar.addView(foldBtn);
+        box.addView(bar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
         img = new ImageView(this);
+        // **FIT_CENTER + adjustViewBounds + WRAP_CONTENT = 窗口紧贴画面。**
+        // 原来用固定 150dp×150dp 的框，FIT_CENTER 把图缩在里面，四周全是留白，
+        // 用户看到的就是「一个很大的背景框包着一小块画面」（用户截图报的问题）。
         img.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        LinearLayout.LayoutParams ilp =
-                new LinearLayout.LayoutParams(dp(150), dp(150));
+        img.setAdjustViewBounds(true);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
         box.addView(img, ilp);
 
         label = new TextView(this);
@@ -124,8 +162,12 @@ public class OverlayService extends Service {
         label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
         label.setGravity(Gravity.CENTER);
         label.setText("AI 画面");
+        // **宽度必须是 WRAP_CONTENT，不能固定 150dp。**
+        // 原来固定 150dp，即使画面缩小了，这一行照样把整个窗口撑到 150dp 宽，
+        // 用户看到的「大黑边框」就是这个（用户截图报的问题）。
         LinearLayout.LayoutParams tlp =
-                new LinearLayout.LayoutParams(dp(150), LinearLayout.LayoutParams.WRAP_CONTENT);
+                new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
         box.addView(label, tlp);
 
         root = box;
@@ -168,7 +210,9 @@ public class OverlayService extends Service {
                         int nw = Math.max(dp(80), startW + (int)(e.getRawX() - downX));
                         int nh = Math.max(dp(60), startH + (int)(e.getRawY() - downY));
                         userW = nw; userH = nh;
-                        img.setLayoutParams(new LinearLayout.LayoutParams(nw, nh));
+                        img.setMaxWidth(nw);
+                        img.setMaxHeight(nh);
+                        img.requestLayout();
                         return true;
                     case MotionEvent.ACTION_UP:
                         return true;
@@ -221,6 +265,7 @@ public class OverlayService extends Service {
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         } else {
             img.setVisibility(View.VISIBLE);
+            appliedAspect = -1f;    // 强制重算
             applyAspect();
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
         }
@@ -234,20 +279,23 @@ public class OverlayService extends Service {
      * **只在比例真的变了才改布局。** 原来每 400ms 无条件 setLayoutParams，
      * 等于每轮一次完整 measure/layout，纯白烧（子代理审代码发现的）。
      */
+    /**
+     * 按真实比例设定显示尺寸。
+     *
+     * **不再写死宽高**：用 maxWidth/maxHeight 给上限，让 ImageView 自己按
+     * adjustViewBounds 算出实际大小。这样画面有多大窗口就多大，没有多余留白。
+     */
     private void applyAspect() {
         if (img == null || collapsed) return;
         float a = (aspect > 0.15f && aspect < 8f) ? aspect : 0.5f;
-        if (Math.abs(a - appliedAspect) < 0.01f) return;   // 没变就别动
+        if (Math.abs(a - appliedAspect) < 0.01f) return;
         appliedAspect = a;
-        // **用户手动设过大小就听用户的，不要按比例覆盖**
-        if (userW > 0) {
-            img.setLayoutParams(new LinearLayout.LayoutParams(userW, userH));
-            return;
-        }
-        int w = dp(150);
-        int h = Math.max(dp(60), Math.round(w / a));
-        if (h > dp(260)) h = dp(260);
-        img.setLayoutParams(new LinearLayout.LayoutParams(w, h));
+        int maxW = (userW > 0) ? userW : dp(150);
+        // 高度上限：按比例算，但不超过屏高的 55%，免得挡住整个屏幕
+        int maxH = (userH > 0) ? userH : Math.min(Math.round(maxW / a), dp(400));
+        img.setMaxWidth(maxW);
+        img.setMaxHeight(maxH);
+        img.requestLayout();
     }
 
     /** 主循环：抓帧 + 抓状态。 */
@@ -498,6 +546,21 @@ public class OverlayService extends Service {
         }
     }
 
+    /** 更新通知（用来提示「已隐藏，点这里恢复」）。 */
+    private void postNotification(String text) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            nm.notify(CH_NUM, buildNotification(text));
+        } catch (Throwable t) { }
+    }
+
+    /** 恢复显示。 */
+    private void unhide() {
+        hidden = false;
+        if (root != null) { root.setVisibility(View.VISIBLE); }
+        postNotification("看屏幕");
+    }
+
     private Notification buildNotification(String text) {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26) {
@@ -512,6 +575,15 @@ public class OverlayService extends Service {
          .setContentText(text)
          .setSmallIcon(android.R.drawable.ic_menu_view)
          .setOngoing(true);
+        // **点通知恢复显示** —— 隐藏之后这是唯一的叫回入口
+        try {
+            Intent open = new Intent(this, OverlayService.class);
+            open.putExtra("unhide", true);
+            int flags = Build.VERSION.SDK_INT >= 23
+                    ? android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE
+                    : android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+            b.setContentIntent(android.app.PendingIntent.getService(this, 1, open, flags));
+        } catch (Throwable t) { }
         return b.build();
     }
 

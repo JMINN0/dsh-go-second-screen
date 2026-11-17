@@ -2,6 +2,7 @@
 import * as vd from './vd.js';
 import * as stream from './stream.js';
 import * as timeline from './timeline.js';
+import { adbTarget } from './target.js';
 
 export async function modes() {
   return {
@@ -223,7 +224,8 @@ export async function status() {
 }
 
 export async function stop(args) {
-  // 先停推流：否则胶囊会永远显示"AI 正在操作"+ 冻在最后一帧（复核实测）。
+  // 先停推流和悬浮窗：否则胶囊会永远显示"AI 正在操作"+ 冻在最后一帧（复核实测）。
+  await overlayStop().catch(() => {});
   await stream.stop().catch(() => {});
   const r = await vd.stop({ forceStopApps: args?.forceStopApps === true });
   const lines = ['虚拟屏已销毁。'];
@@ -232,7 +234,52 @@ export async function stop(args) {
   return { text: lines.join('\n') };
 }
 
-/** 开始把虚拟屏画面推给原生胶囊插件。 */
+/** 悬浮窗 APK 的包名。装了就能把画面浮在任何 App 上。 */
+const OVERLAY_PKG = 'com.dsh.overlay';
+
+/**
+ * 拉起 / 关掉悬浮窗 APK。
+ *
+ * **为什么要自动做**：手动敲三条 adb 命令太麻烦，而且容易忘。
+ * 起推流时自动把端口传给它，停推流时自动关掉 —— 用户只要调 vdisplay_stream 就够。
+ *
+ * APK 不在就静默跳过：胶囊仍然能用，只是没有跨 App 的悬浮窗。
+ */
+async function overlayStart(port) {
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const target = await adbTarget();
+    // 先看装没装
+    const { stdout } = await run('adb', ['-s', target, 'shell',
+      `pm list packages ${OVERLAY_PKG}`], { timeout: 8000 });
+    if (!String(stdout || '').includes(OVERLAY_PKG)) return { ok: false, why: '没装' };
+    // 给权限（幂等，已给过也不报错）
+    await run('adb', ['-s', target, 'shell',
+      `appops set ${OVERLAY_PKG} SYSTEM_ALERT_WINDOW allow`], { timeout: 8000 }).catch(() => {});
+    // 拉起并把端口传进去
+    await run('adb', ['-s', target, 'shell',
+      `am start -n ${OVERLAY_PKG}/.MainActivity --ei port ${port}`], { timeout: 8000 });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, why: String(e?.message || e).slice(0, 60) };
+  }
+}
+
+async function overlayStop() {
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const target = await adbTarget();
+    await run('adb', ['-s', target, 'shell',
+      `am start -n ${OVERLAY_PKG}/.MainActivity --ez stop true`], { timeout: 8000 });
+    return { ok: true };
+  } catch { return { ok: false }; }
+}
+
+/** 开始把虚拟屏画面推给原生胶囊插件（装了悬浮窗 APK 的话一起拉起来）。 */
 export async function streamStart(args) {
   const s = await vd.start();
   if (!s.ok) return { text: `建屏失败：${s.hint}` };
@@ -243,16 +290,22 @@ export async function streamStart(args) {
   const r = await stream.start({ sfId: s.sfId, displayId: s.displayId, fps, width, focusedApp: focus });
   try { stream.setState('looking'); } catch { /* ignore */ }
   if (!r.ok) return { text: `推流启动失败：${r.hint}` };
+  // **自动拉起悬浮窗**：装了就能浮在任何 App 上，没装就只用胶囊
+  const ov = await overlayStart(r.port);
   return {
     text: `推流已开启：127.0.0.1:${r.port}，${fps} fps，宽度 ${width}\n`
-      + '打开 DSH Go 输入框上方的「AI 画面」胶囊，点它就能看到虚拟屏。\n'
+      + (ov.ok
+        ? '悬浮窗已浮起（可拖动，单击收起，浮在任何 App 上）\n'
+        : `胶囊可用；悬浮窗没起来（${ov.why}）\n`)
+      + '打开 DSH Go 输入框上方的「AI 画面」胶囊，点它也能看。\n'
       + '实测这个档位约 0.30 核、29 KB/s，不写任何文件。',
   };
 }
 
 export async function streamStop() {
+  await overlayStop();       // 先关悬浮窗，否则它会自己发现推流没了才关（多留一会儿）
   await stream.stop();
-  return { text: '推流已停止（胶囊不再显示画面）。' };
+  return { text: '推流已停止（胶囊和悬浮窗都不再显示画面）。' };
 }
 
 export async function closeAll() {

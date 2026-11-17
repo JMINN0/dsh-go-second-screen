@@ -5,9 +5,9 @@
   "main": "./src/index.js",
   "description": "手机操控全家桶：虚拟屏、ImageReader 取帧（53fps）、视觉识别、浏览器 CDP、adb。把原来 3 个插件合成 1 个入口。",
   "dependencies": {
-    "dsh-go-plugin-adb": "link:../dsh-go-plugin-adb",
-    "dsh-go-plugin-screen": "link:./screen",
-    "dsh-go-plugin-web": "link:./web"
+    "dsh-go-plugin-adb": "link:../../dsh-go-plugin-adb",
+    "dsh-go-plugin-screen": "link:../screen",
+    "dsh-go-plugin-web": "link:../web"
   },
   "license": "MIT",
   "author": "JMINNO",

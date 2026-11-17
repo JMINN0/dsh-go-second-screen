@@ -78,8 +78,19 @@ export async function input(args) {
   // **记下坐标**：推流帧上会画出十字，用户能直接看到 AI 点在哪
   try {
     const a0 = args || {};
-    const mx = Number.isFinite(Number(a0.nx)) ? Number(a0.nx) : (Number.isFinite(Number(a0.x)) ? Number(a0.x) / 100000 : NaN);
-    const my = Number.isFinite(Number(a0.ny)) ? Number(a0.ny) : (Number.isFinite(Number(a0.y)) ? Number(a0.y) / 100000 : NaN);
+    // **像素坐标要按屏幕尺寸归一化，不是除以 100000。**
+    // 原来 x/100000 是拍脑袋的：720 宽的屏上 x=360 会算成 0.0036，
+    // 十字画在左上角，跟实际点的地方完全不对。
+    let mx = NaN, my = NaN;
+    if (Number.isFinite(Number(a0.nx)) && Number.isFinite(Number(a0.ny))) {
+      mx = Number(a0.nx); my = Number(a0.ny);
+    } else if (Number.isFinite(Number(a0.x)) && Number.isFinite(Number(a0.y))) {
+      const vst = await vd.status().catch(() => null);
+      const sw = (vst && vst.width) || 720;
+      const sh = (vst && vst.height) || 1592;
+      mx = Number(a0.x) / sw;
+      my = Number(a0.y) / sh;
+    }
     if (Number.isFinite(mx) && Number.isFinite(my)) stream.markTap(mx, my, String(a0.kind || 'tap'));
   } catch { /* 没坐标就算了（滑动这类） */ }
   const kind = String(args?.kind || '').trim();
@@ -354,12 +365,36 @@ export async function streamStart(args) {
     });
   } catch (e) { fast = { ok: false, why: String(e?.message || e).slice(0, 60) }; }
 
-  // 慢路径：framesrv 不行就退回 screencap 推流（保证有画面）
-  const r = await stream.start({ sfId: s.sfId, displayId: s.displayId, fps, width, focusedApp: focus });
-  if (!r.ok && !fast.ok) return { text: `推流启动失败：${r.hint}` };
+  // **只有快路径失败时才起 screencap 推流。**
+  // 审计发现：原来无条件起，两条路同时跑，多烧 0.31 核，而且胶囊读的是慢的那条
+  // （screencap 143ms/帧），用户看到的反而是差的那一路。
+  let r = { ok: false, port: 0, hint: '跳过了（快路径已在跑）' };
+  if (!fast.ok) {
+    r = await stream.start({ sfId: s.sfId, displayId: s.displayId, fps, width, focusedApp: focus });
+    if (!r.ok) return { text: `推流启动失败：${r.hint}` };
+  } else {
+    // **快路径在跑 → 把 stream.json 指向 framesrv**，让胶囊读快的这一路。
+    // 胶囊读 stream.json 的 port 去取 /frame.jpg 和 /status，
+    // framesrv 的这两个端点返回的字段是兼容的（running/frames/fps/aspect）。
+    try {
+      const { writeFile, mkdir } = await import('node:fs/promises');
+      const { homedir } = await import('node:os');
+      const { join } = await import('node:path');
+      const dir = join(homedir(), '.dsh', 'plugin-screen');
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, 'stream.json'), JSON.stringify({
+        port: fast.port, running: true, startedAt: Date.now(),
+        fps, width, displayId: String(s.displayId),
+        focusedApp: focus || '',
+        state: 'looking',
+        aspect: s.width && s.height ? (s.width / s.height) : 0,
+        backend: 'imagereader',
+      }));
+    } catch { /* 写不进去不影响推流 */ }
+  }
 
   // 悬浮窗连哪个端口：优先 framesrv（快）
-  const viewPort = fast.ok ? fast.port : r.port;
+  const viewPort = fast.ok ? fast.port : (r.port || 0);
   const ov = await overlayStart(viewPort);
 
   const lines = [];
@@ -377,8 +412,19 @@ export async function streamStart(args) {
 
 export async function streamStop() {
   await overlayStop();       // 先关悬浮窗，否则它会自己发现推流没了才关（多留一会儿）
+  // **真的把 framesrv 停掉。**
+  // 审计发现：原来全库没有任何 framesrv.stop() 调用点 ——
+  // app_process 起来了就一直在，一直编码，直到手机重启或 OOM。
+  let stoppedFast = false;
+  try {
+    const fsrv = await import('./framesrv.js');
+    await fsrv.stop();
+    stoppedFast = true;
+  } catch { /* 没起来就算了 */ }
   await stream.stop();
-  return { text: '推流已停止（胶囊和悬浮窗都不再显示画面）。' };
+  return { text: stoppedFast
+    ? '推流已停止（framesrv 已退出，胶囊和悬浮窗都不再显示画面）。'
+    : '推流已停止（胶囊和悬浮窗都不再显示画面）。' };
 }
 
 export async function closeAll() {
@@ -578,6 +624,11 @@ export async function live(args) {
     const r = await vd.startLive({ quality: Number(args?.quality) || 5 });
     const s = await vd.videoStats();
     return {
+      // **必须给 text**：out() 的 schema 里 text 是 required 且 additionalProperties:false，
+      // 少这个字段模型拿到的是空结果（审计发现的 P0）。
+      text: r.ok
+        ? `解码器 ${s.decoder ? '已启动' : '未启动'}；流 ${s.width}x${s.height}，${s.frames} 帧，实测 ${s.fps || 0} fps。`
+        : `解码器操作失败：${r.hint || '未知'}`,
       ok: Boolean(r.ok),
       hint: r.hint,
       decoder: s.decoder,
@@ -618,12 +669,16 @@ export async function liveShot(args) {
   });
   if (!r.ok) {
     return {
+      // **text 必填**，失败分支也要给
+      text: `取帧失败：${r.hint || '未知'}。改用 vdisplay_shot（走 screencap，静止屏也能截）。`,
       ok: false,
       hint: r.hint,
       fallback: '用 vdisplay_shot（走 screencap，静止屏也能截）',
     };
   }
   return {
+    // **text 必填**（out() 的 schema 要求），少了模型拿到空结果
+    text: `从流里取到一帧：${r.path || '(无路径)'}（${r.bytes || 0} 字节）`,
     ok: true,
     path: r.path,
     width: r.width,
@@ -648,6 +703,8 @@ export async function waitStable(args) {
     threshold: Number(args?.threshold) || 0.5,
   });
   return {
+    // **text 必填**
+    text: `画面${r.stable !== false ? '已稳定' : '未稳定'}，等了 ${r.waitedMs || 0} ms（尾部 MAD ${r.tailMad ?? '?'}）。`,
     ok: r.stable !== false,
     waitedMs: r.waitedMs,
     stable: r.stable,
@@ -670,11 +727,15 @@ export async function roi(args) {
   });
   if (!r) {
     return {
+      // **text 必填**，失败分支也要给
+      text: '挑不出合适的区域（画面可能完全没有变化，也没有最近的点击位置）。直接 vdisplay_shot 全屏。',
       ok: false,
       hint: '挑不出合适的区域（画面可能完全没有变化，也没有最近的点击位置）。直接 vdisplay_shot 全屏。',
     };
   }
   return {
+    // **text 必填**
+    text: `推荐区域 region{ x:${r.x}, y:${r.y}, w:${r.w}, h:${r.h} }，来源 ${r.src || '?'}，占屏 ${((r.area || 0) * 100).toFixed(1)}%。`,
     ok: true,
     region: { x: r.x, y: r.y, w: r.w, h: r.h },
     src: r.src,
@@ -690,8 +751,10 @@ export async function roi(args) {
  */
 export async function probeSecure(args) {
   const r = await vd.probeSecure({ dir: String(args?.dir || '/tmp') });
-  if (!r.ok) return { ok: false, hint: r.hint };
+  if (!r.ok) return { text: `黑屏探针失败：${r.hint || '未知'}`, ok: false, hint: r.hint };
   return {
+    // **text 必填**（out() 的 schema 要求），少了模型拿到空结果
+    text: `黑屏探针结论：${r.verdict || '正常出画'}（置信度 ${r.confidence ?? '?'}）。${r.hint || ''}`,
     ok: true,
     verdict: r.verdict,
     confidence: r.confidence,

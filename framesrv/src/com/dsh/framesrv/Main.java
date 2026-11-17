@@ -58,6 +58,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class Main {
 
+    static final long createdAt = System.currentTimeMillis();
     static int displayId = 0;
     static int port = 38810;
     static int outWidth = 400;
@@ -70,6 +71,14 @@ public class Main {
     static final AtomicInteger lastSecFrames = new AtomicInteger(0);
     static volatile int fps = 0;
     static final Set<Socket> mjpegClients = ConcurrentHashMap.newKeySet();
+
+    // **看门狗：没人看的时候就别再编码了。**
+    // 审计发现：原来不管有没有客户端，每帧都在 encode（53.7fps × ~19MB 垃圾/帧
+    // = 1.04 GB/s），而且进程永不退出，一直烧 1.0 核。
+    static volatile long lastFetchAt = 0;      // 上次有人取帧
+    static volatile long lastCheckAt = 0;
+    static final int IDLE_PAUSE_MS = 15_000;   // 15 秒没人取 → 暂停编码
+    static final int IDLE_EXIT_MS = 120_000;   // 120 秒彻底没人 → 自己退出
 
     public static void main(String[] args) {
         for (String a : args) {
@@ -88,12 +97,20 @@ public class Main {
         th.start();
         Handler h = new Handler(th.getLooper());
 
-        // 每秒算一次 fps
+        // 每秒算一次 fps + **空闲自杀**
         new Thread(new Runnable() {
             public void run() {
                 while (true) {
                     try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
                     fps = lastSecFrames.getAndSet(0);
+                    // **长时间没人看就自己退出。**
+                    // 原来这个进程永不停止：app_process 一直活着，一直编码，
+                    // 一直占 1.0 核，直到手机重启或 OOM。
+                    long idle = System.currentTimeMillis() - Math.max(lastFetchAt, createdAt);
+                    if (idle > IDLE_EXIT_MS && mjpegClients.isEmpty()) {
+                        System.out.println("IDLE_EXIT idleMs=" + idle);
+                        System.exit(0);
+                    }
                 }
             }
         }).start();
@@ -108,7 +125,13 @@ public class Main {
                     if (img == null) return;
                     frames.incrementAndGet();
                     lastSecFrames.incrementAndGet();
-                    // 编码 JPEG（放到回调外会更稳，但这里先简单做）
+                    // **没人看就不编码** —— 只统计帧数，把 buffer 直接还回去。
+                    // 这是审计里最大的一笔浪费：原来无条件编码，1.04 GB/s 的垃圾。
+                    long nowMs = System.currentTimeMillis();
+                    boolean watching = (nowMs - lastFetchAt) < IDLE_PAUSE_MS;
+                    if (!watching && mjpegClients.isEmpty()) {
+                        return;    // finally 会 close
+                    }
                     byte[] jpg = encode(img);
                     if (jpg != null) {
                         latest = jpg;
@@ -239,6 +262,7 @@ public class Main {
 
             OutputStream out = s.getOutputStream();
             if (path.startsWith("/frame.jpg")) {
+                lastFetchAt = System.currentTimeMillis();   // 有人在看
                 byte[] j = latest;
                 if (j == null) {
                     out.write("HTTP/1.1 503 No Frame\r\n\r\n".getBytes());
@@ -250,7 +274,11 @@ public class Main {
                 out.flush();
                 s.close();
             } else if (path.startsWith("/status")) {
-                String j = "{\"running\":true,\"frames\":" + frames.get()
+                // **running 必须反映「还在被看」的状态，不能写死 true。**
+                // 写死的话悬浮窗永远认为推流活着，不会自动关；
+                // 审计发现 README 承诺的「推流停了自己消失」因此失效。
+                boolean alive = (System.currentTimeMillis() - lastFetchAt) < IDLE_EXIT_MS;
+                String j = "{\"running\":" + alive + ",\"frames\":" + frames.get()
                         + ",\"fps\":" + fps + ",\"width\":" + outWidth
                         + ",\"aspect\":" + ((double) srcW / srcH) + "}";
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
@@ -258,6 +286,7 @@ public class Main {
                 out.flush();
                 s.close();
             } else if (path.startsWith("/stream.mjpg")) {
+                lastFetchAt = System.currentTimeMillis();   // 长连接 = 有人在看
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=--dshframe\r\n"
                         + "Cache-Control: no-store\r\nConnection: keep-alive\r\n\r\n").getBytes());
                 out.flush();

@@ -1374,6 +1374,11 @@ export async function stopLive() {
  */
 function frameTick() {
   const st = state.videoReader;
+  // **必须用单调递增的 frames，不能用 packets.length。**
+  // packets 缓冲上限 400，16 秒后饱和不再增长 → 每次 input 都以为"画面没变"，
+  // 退化成两次 screencap，单次输入从 243ms 涨到 2 秒以上。
+  // 审计发现：watchFrames 的注释写过这个坑，但 frameTick 没改。
+  if (st && typeof st.frames === 'number') return { kind: 'frames', v: st.frames };
   if (st && st.packets) return { kind: 'packets', v: st.packets.length };
   return { kind: 'none', v: 0 };
 }

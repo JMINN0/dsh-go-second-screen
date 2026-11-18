@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import net from 'node:net';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -236,6 +236,53 @@ async function sfIds() {
   return ids;   // 空集合 = 确实没有 scrcpy 虚拟屏，不是查询失败
 }
 
+/* ═══ 虚拟屏状态持久化 ═══
+ *
+ * 为什么必须做：state 是进程内的。DSH 引擎重启、插件热重载、或者任何一个
+ * 新 Node 进程调工具时，state.displayId 都是 null → alive() 直接判死 →
+ * start() 又建一块新屏。
+ *
+ * 实机表现（用户报的）：
+ *   · display 号一路涨：448 → 452 → 453 → 457 → 460
+ *   · framesrv/悬浮窗还指着旧屏 → 画面看起来"变成前台画面"
+ *   · 屏越积越多，stop 也停不对
+ *
+ * 修法：把 displayId/sfId/scid 写盘，模块加载时读回来。
+ */
+const VD_STATE_FILE = join(homedir(), '.dsh', 'plugin-screen', 'vdisplay.json');
+let _vdRestored = false;
+
+function loadPersistedState() {
+  if (_vdRestored) return;
+  _vdRestored = true;
+  try {
+    const j = JSON.parse(readFileSync(VD_STATE_FILE, 'utf8'));
+    if (j && j.displayId) {
+      state.displayId = j.displayId;
+      state.sfId = j.sfId || null;
+      state.scid = j.scid || null;
+      if (j.width) state.width = j.width;
+      if (j.height) state.height = j.height;
+      state.startedAt = j.startedAt || 0;
+    }
+  } catch { /* 没有或读坏了就算了 */ }
+}
+
+function savePersistedState() {
+  try {
+    mkdirSync(dirname(VD_STATE_FILE), { recursive: true });
+    writeFileSync(VD_STATE_FILE, JSON.stringify({
+      displayId: state.displayId, sfId: state.sfId, scid: state.scid,
+      width: state.width, height: state.height, startedAt: state.startedAt,
+      at: Date.now(),
+    }));
+  } catch { /* ignore */ }
+}
+
+function clearPersistedState() {
+  try { rmSync(VD_STATE_FILE, { force: true }); } catch { /* ignore */ }
+}
+
 /**
  * 一块屏的完整上下文。
  *
@@ -364,7 +411,8 @@ export async function start({ width = 0, height = 0, dpi = 320, systemDecoration
       if (state.hwc !== hwc && hwc !== 'auto') {
         diff.push(`请求 hwc=${hwc}，实际 ${state.hwc}`);
       }
-      return {
+      savePersistedState();   // 复用也刷新一下，保证文件里的值是最新的
+    return {
         ok: true, displayId: state.displayId, sfId: state.sfId, reused: true,
         width: state.width, height: state.height,
         canHost: /FLAG_OWN_CONTENT_ONLY/.test(fl) && /FLAG_OWN_FOCUS/.test(fl),
@@ -549,6 +597,8 @@ export async function start({ width = 0, height = 0, dpi = 320, systemDecoration
   const flags = await shell(`dumpsys display 2>/dev/null | grep "DisplayDeviceInfo.*scrcpy" | head -1`);
   const canHost = /FLAG_OWN_CONTENT_ONLY/.test(flags) && /FLAG_OWN_FOCUS/.test(flags);
 
+  // **建屏成功就落盘**：之后任何进程都能复用这块屏，不会重复建。
+  savePersistedState();
   return {
     ok: true,
     displayId: state.displayId,
@@ -764,6 +814,7 @@ function forget(reason) {
   state.displayId = null; state.sfId = null; state.scid = null; state.port = null;
   state.lastShotHash = null; state.lastShotPath = null; state.lastShotImgWidth = 0;
   state.lastShotRegion = null;   // 尺寸/位置基准作废，否则 input 会按旧 region 换算
+  clearPersistedState();         // **盘上的记录也清掉**，否则下个进程会去复用死屏
   // **hwcPrev 必须清掉**：不清的话，重建时 getprop 已经是 1，于是 hwcPrev 被记成 '1'，
   // stop 时又恢复成 1，全局 debug.sf.enable_hwc_vds 残到重启（对抗审查 S1）。
   state.hwcPrev = null;
@@ -1976,3 +2027,6 @@ export async function mainFocus() {
   }
   return '';
 }
+
+// **模块加载时恢复上次的屏**，这样新进程不会重复建屏。
+try { loadPersistedState(); } catch { /* ignore */ }

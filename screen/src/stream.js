@@ -306,12 +306,13 @@ async function tick() {
   const active = (now - st.lastActivityAt) < WATCH_MS;
 
   // ① done 状态保留一段时间后自动关（用户提的「操作完了就不该一直显示」）
-  if (st.state === 'done' && st.doneAt && (now - st.doneAt) > DONE_KEEP_MS) {
+  if (!st.extPort && st.state === 'done' && st.doneAt && (now - st.doneAt) > DONE_KEEP_MS) {
     await shutdown();
     return;
   }
-  // ② 长时间彻底没动静 → 自动关
-  if (!watching && !active && (now - Math.max(st.lastFrameFetchAt, st.lastActivityAt, st.startedAt)) > IDLE_SHUTDOWN_MS) {
+  // ② 长时间彻底没动静 → 自动关（**但外部后端在跑时不关**）
+  // 用户要求：「屏没关就一直显示」。framesrv 有自己的空闲退出，这里不该抢着关。
+  if (!st.extPort && !watching && !active && (now - Math.max(st.lastFrameFetchAt, st.lastActivityAt, st.startedAt)) > IDLE_SHUTDOWN_MS) {
     await shutdown();
     return;
   }
@@ -351,6 +352,11 @@ function writeMjpeg(res, jpg) {
 
 async function writeState() {
   try {
+    // **没有真实状态时不要覆盖已有的好文件。**
+    // 实机踩到：每个新 Node 进程的 stream.js 状态都是空的（port=0, running=false），
+    // 一次 setState() 就把 framesrv 写好的 stream.json 清成 port:0，
+    // 胶囊/标记全失联。所以「没端口也没在跑」时直接跳过写盘。
+    if (!st.extPort && !st.running && !st.port) return;
     await mkdir(STATE_DIR, { recursive: true });
     await writeFile(STATE_FILE, JSON.stringify({
       // **有外部后端时报它的端口**，否则胶囊会去连死的 screencap 端口

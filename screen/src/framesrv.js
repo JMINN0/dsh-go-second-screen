@@ -108,7 +108,18 @@ export async function start({ displayId, width, height, port = DEFAULT_PORT } = 
   const pushed = await pushDex(target);
   if (!pushed.ok) return pushed;
 
-  const size = `${width}x${height}`;
+  // **查这块屏的真实尺寸，不要用调用方传的兜底值。**
+  // 实机踩到：横屏游戏 1592x720，但 vd.start() 不返回 width/height，
+  // 兜底成 720x1592 → 镜像压扁 + 巨大黑边，用户看到的就是「黑边太严重」。
+  let realW = width, realH = height;
+  try {
+    const r = await run('adb', ['-s', target, 'shell',
+      `dumpsys display 2>/dev/null | grep -A6 "Display ${displayId}:" | grep -oE "real [0-9]+ x [0-9]+" | head -1`],
+      { timeout: 8000 });
+    const m = String(r.stdout || '').match(/real (\d+) x (\d+)/);
+    if (m) { realW = Number(m[1]); realH = Number(m[2]); }
+  } catch { /* 查不到就用传入值 */ }
+  const size = `${realW}x${realH}`;
   const cmd = `CLASSPATH=${REMOTE_DEX} app_process / com.dsh.framesrv.Main`
     + ` --display=${displayId} --port=${port} --width=400 --size=${size}`;
 
@@ -172,6 +183,42 @@ export async function info() {
     size: state.size,
     ...(p.info || {}),
   };
+}
+
+/** 把点击位置发给 framesrv，下一帧会画十字。 */
+export async function markTap(nx, ny) {
+  // **端口优先用进程内状态，没有就回退到 stream.json。**
+  // 实机踩到：模块状态是进程内的，换一个 Node 进程调 input 时 state.port 是 0
+  // → 标记发不出去 → 用户看不到点击位置。真实插件里是同一个引擎进程，
+  // 但进程重启/热重载时状态会丢，所以必须有兜底。
+  let port = state.port && state.running ? state.port : 0;
+  if (!port) {
+    try {
+      const { readFile } = await import('node:fs/promises');
+      const { homedir } = await import('node:os');
+      const { join } = await import('node:path');
+      const raw = await readFile(join(homedir(), '.dsh', 'plugin-screen', 'stream.json'), 'utf8');
+      const j = JSON.parse(raw);
+      if (j && j.port && (j.backend === 'imagereader')) port = Number(j.port);
+    } catch { /* 读不到就算了 */ }
+  }
+  if (!port) return;
+  try {
+    const { request } = await import('node:http');
+    const x = Math.max(0, Math.min(1, Number(nx)));
+    const y = Math.max(0, Math.min(1, Number(ny)));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    await new Promise((resolve) => {
+      const req = request({
+        host: '127.0.0.1', port,
+        path: `/mark?nx=${x.toFixed(4)}&ny=${y.toFixed(4)}`,
+        method: 'GET', timeout: 600,
+      }, (res) => { res.resume(); res.on('end', resolve); });
+      req.on('error', () => resolve());
+      req.on('timeout', () => { req.destroy(); resolve(); });
+      req.end();
+    });
+  } catch { /* 画不上就算了 */ }
 }
 
 export function currentPort() { return state.port; }

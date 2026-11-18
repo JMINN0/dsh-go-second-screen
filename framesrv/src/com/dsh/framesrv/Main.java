@@ -67,6 +67,11 @@ public class Main {
     static ImageReader reader;
     static VirtualDisplay vd;
     static volatile byte[] latest = null;
+    // **缓存最后一帧的原始像素**，收到 /mark 时用它重编一张带标记的。
+    // 为什么必须：画面静止时 ImageReader 不出新帧，`latest` 永远是标记之前那张，
+    // 标记就永远不出现（实机踩到）。收到 /mark 要能自己主动重画一帧。
+    static volatile android.graphics.Bitmap lastBmp = null;
+    static final Object bmpLock = new Object();
     static final AtomicInteger frames = new AtomicInteger(0);
     static final AtomicInteger lastSecFrames = new AtomicInteger(0);
     static volatile int fps = 0;
@@ -76,6 +81,12 @@ public class Main {
     // 审计发现：原来不管有没有客户端，每帧都在 encode（53.7fps × ~19MB 垃圾/帧
     // = 1.04 GB/s），而且进程永不退出，一直烧 1.0 核。
     static volatile long lastFetchAt = 0;      // 上次有人取帧
+
+    // **点击标记**：让用户看到 AI 点在哪、有没有点偏。
+    // 之前标记只画在 stream.js 的 screencap 慢路径里，快路径（本服务）没画，
+    // 所以用户看不到点击位置 —— 这是实机反馈的问题。
+    static volatile float markNx = -1f, markNy = -1f;
+    static volatile long markAt = 0;
     static volatile long lastCheckAt = 0;
     static final int IDLE_PAUSE_MS = 15_000;   // 15 秒没人取 → 暂停编码
     static final int IDLE_EXIT_MS = 120_000;   // 120 秒彻底没人 → 自己退出
@@ -238,11 +249,103 @@ public class Main {
                 bm.compress(Bitmap.CompressFormat.JPEG, 70, o);
                 out = o.toByteArray();
             }
-            bm.recycle();
-            return out;
+            // **画点击十字**（5 秒内的标记）
+            byte[] marked = out;
+            try {
+                long age = System.currentTimeMillis() - markAt;
+                if (marked != null && markNx >= 0 && age < 5000) {
+                    android.graphics.Bitmap target = null;
+                    if (w > outWidth) {
+                        // out 是缩放后的，重画一遍
+                        int nh2 = h * outWidth / w;
+                        target = android.graphics.Bitmap.createScaledBitmap(bm, outWidth, nh2, true);
+                    }
+                    if (target != null) {
+                        android.graphics.Canvas cv = new android.graphics.Canvas(target);
+                        android.graphics.Paint pt = new android.graphics.Paint();
+                        pt.setAntiAlias(true);
+                        float tw = target.getWidth(), th = target.getHeight();
+                        float cx = markNx * tw, cy = markNy * th;
+                        // 透明度：最新 1.0 → 2 秒后 0.45 常驻
+                        int alpha = (age < 2000) ? 255 : 115;
+                        float arm = Math.max(9f, tw * 0.028f);
+                        float thick = Math.max(3f, tw * 0.008f);
+                        // 白色描边（深色背景也看得见）
+                        pt.setColor(0x80FFFFFF);
+                        pt.setStyle(android.graphics.Paint.Style.STROKE);
+                        pt.setStrokeWidth(thick + 2);
+                        float boxR = Math.max(18f, tw * 0.055f);
+                        cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
+                        // 红色十字
+                        pt.setColor((alpha << 24) | 0xFF2D2D);
+                        pt.setStyle(android.graphics.Paint.Style.FILL);
+                        cv.drawRect(cx - arm, cy - thick, cx + arm, cy + thick, pt);
+                        cv.drawRect(cx - thick, cy - arm, cx + thick, cy + arm, pt);
+                        // 空心外框
+                        pt.setStyle(android.graphics.Paint.Style.STROKE);
+                        pt.setStrokeWidth(thick);
+                        cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
+                        java.io.ByteArrayOutputStream o2 = new java.io.ByteArrayOutputStream();
+                        target.compress(Bitmap.CompressFormat.JPEG, 70, o2);
+                        marked = o2.toByteArray();
+                        target.recycle();
+                    }
+                }
+            } catch (Throwable t) { /* 画失败就用原图 */ }
+            // **留一份 bmp 给 /mark 重画用**（不 recycle）
+            synchronized (bmpLock) {
+                if (lastBmp != null && lastBmp != bm) { try { lastBmp.recycle(); } catch (Throwable t) { } }
+                lastBmp = bm;
+            }
+            return marked;
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /** 用缓存的最后一帧重编一张带标记的（/mark 时调）。 */
+    static void reencodeWithMark() {
+        try {
+            android.graphics.Bitmap src;
+            synchronized (bmpLock) { src = lastBmp; }
+            if (src == null || src.isRecycled()) return;
+            int ow = outWidth;
+            int oh = src.getHeight() * ow / src.getWidth();
+            android.graphics.Bitmap target = android.graphics.Bitmap.createScaledBitmap(src, ow, oh, true);
+            android.graphics.Canvas cv = new android.graphics.Canvas(target);
+            android.graphics.Paint pt = new android.graphics.Paint();
+            pt.setAntiAlias(true);
+            float tw = target.getWidth(), th = target.getHeight();
+            float cx = markNx * tw, cy = markNy * th;
+            float arm = Math.max(9f, tw * 0.028f);
+            float thick = Math.max(3f, tw * 0.008f);
+            float boxR = Math.max(18f, tw * 0.055f);
+            pt.setColor(0x80FFFFFF);
+            pt.setStyle(android.graphics.Paint.Style.STROKE);
+            pt.setStrokeWidth(thick + 2);
+            cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
+            pt.setColor(0xFFFF2D2D);
+            pt.setStyle(android.graphics.Paint.Style.FILL);
+            cv.drawRect(cx - arm, cy - thick, cx + arm, cy + thick, pt);
+            cv.drawRect(cx - thick, cy - arm, cx + thick, cy + arm, pt);
+            pt.setStyle(android.graphics.Paint.Style.STROKE);
+            pt.setStrokeWidth(thick);
+            cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
+            java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
+            target.compress(Bitmap.CompressFormat.JPEG, 70, o);
+            byte[] jpg = o.toByteArray();
+            target.recycle();
+            latest = jpg;
+            // 推给所有 MJPEG 客户端
+            for (Socket c2 : mjpegClients) {
+                try {
+                    OutputStream os = c2.getOutputStream();
+                    os.write(("--dshframe\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                            + jpg.length + "\r\n\r\n").getBytes());
+                    os.write(jpg); os.write("\r\n".getBytes()); os.flush();
+                } catch (Throwable t) { mjpegClients.remove(c2); }
+            }
+        } catch (Throwable t) { /* 画失败就算了 */ }
     }
 
     static void handle(Socket s) {
@@ -302,6 +405,30 @@ public class Main {
                             + j.length + "\r\n\r\n").getBytes());
                     out.write(j); out.write("\r\n".getBytes()); out.flush();
                 }
+            } else if (path.startsWith("/mark")) {
+                // /mark?nx=0.5&ny=0.3  → 记下点击位置，下一帧画十字
+                try {
+                    int qi = path.indexOf('?');
+                    if (qi > 0) {
+                        String q = path.substring(qi + 1);
+                        for (String kv : q.split("&")) {
+                            String[] p2 = kv.split("=");
+                            if (p2.length == 2) {
+                                if ("nx".equals(p2[0])) markNx = Float.parseFloat(p2[1]);
+                                if ("ny".equals(p2[0])) markNy = Float.parseFloat(p2[1]);
+                            }
+                        }
+                        markAt = System.currentTimeMillis();
+                        // **立刻用缓存的最后一帧重编一张带标记的**，
+                        // 不等下一个 ImageReader 回调（静止画面根本不回调）
+                        reencodeWithMark();
+                    }
+                    out.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".getBytes());
+                } catch (Throwable t) {
+                    out.write("HTTP/1.1 400 Bad\r\nContent-Length: 3\r\n\r\nbad".getBytes());
+                }
+                out.flush();
+                s.close();
             } else if (path.startsWith("/quit")) {
                 out.write("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbye".getBytes());
                 out.flush();

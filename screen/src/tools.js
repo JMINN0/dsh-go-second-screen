@@ -47,6 +47,18 @@ export async function start(args) {
       + '要按新配置建屏，请先 vdisplay_stop 再 vdisplay_start。');
   }
   parts.push('这块屏用户看不见，不占主屏焦点。');
+
+  // **屏建好就自动开推流** —— 用户的要求：「如果后台屏存在就自动拉起推流屏幕」。
+  // 这样用户不用手动调 vdisplay_stream，建屏就能看到画面。
+  try {
+    const auto = await streamStart({ fps: 10, width: 480 });
+    const t = String(auto?.text || '');
+    if (/悬浮窗已浮起/.test(t)) parts.push('✅ 推流已自动开启，悬浮窗浮起（能看到这块屏的画面）');
+    else if (/ImageReader/.test(t)) parts.push('✅ 推流已自动开启（' + t.split('\n')[0] + '）');
+    else parts.push('⚠️ 推流没起来：' + t.split('\n').slice(0,2).join(' '));
+  } catch (e) {
+    parts.push('⚠️ 自动推流失败：' + String(e?.message || e).slice(0, 60));
+  }
   return { text: parts.join('\n') };
 }
 
@@ -91,7 +103,16 @@ export async function input(args) {
       mx = Number(a0.x) / sw;
       my = Number(a0.y) / sh;
     }
-    if (Number.isFinite(mx) && Number.isFinite(my)) stream.markTap(mx, my, String(a0.kind || 'tap'));
+    if (Number.isFinite(mx) && Number.isFinite(my)) {
+      // **两个后端各自独立 try。**
+      // 原来整段共用一个 try/catch：stream.markTap 一抛错，后面的
+      // framesrv.markTap 就被跳过，用户看不到点击位置（实机踩到）。
+      try { stream.markTap(mx, my, String(a0.kind || 'tap')); } catch { /* 慢路径失败不影响快路径 */ }
+      try {
+        const fsrv = await import('./framesrv.js');
+        await fsrv.markTap(mx, my);                        // 快路径（ImageReader）画
+      } catch { /* 快路径失败不影响慢路径 */ }
+    }
   } catch { /* 没坐标就算了（滑动这类） */ }
   const kind = String(args?.kind || '').trim();
   if (!['tap', 'swipe', 'text', 'key', 'paste'].includes(kind)) return { text: 'kind 只能是 tap / swipe / text / key / paste。' };
@@ -237,6 +258,11 @@ export async function status() {
 export async function stop(args) {
   // 先停推流和悬浮窗：否则胶囊会永远显示"AI 正在操作"+ 冻在最后一帧（复核实测）。
   await overlayStop().catch(() => {});
+  // **屏关了就停 framesrv** —— 用户的要求：「关闭就跟着自动关闭推流屏」
+  try {
+    const fsrv = await import('./framesrv.js');
+    await fsrv.stop();
+  } catch { /* 没起来就算了 */ }
   await stream.stop().catch(() => {});
   const r = await vd.stop({ forceStopApps: args?.forceStopApps === true });
   const lines = ['虚拟屏已销毁。'];

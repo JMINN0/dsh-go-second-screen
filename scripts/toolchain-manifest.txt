@@ -1,0 +1,28 @@
+# 本机工具清单（2026-11-18 22:58）
+# DSH Go: versionName=1.1.0 versionCode=11150838
+# 用途：环境重置后按这个装回来
+
+## apt 包（自动探测）
+aapt
+adb
+apksigner
+ffmpeg
+libsmali-java
+tesseract-ocr
+zipalign
+
+## pip 包（视觉/语音相关）
+numpy==2.5.4
+onnxruntime==1.31.1
+pillow==13.0.0
+rapidocr==3.10.0
+rapidocr-onnxruntime==1.4.4
+sherpa_onnx==2.0.1
+sherpa-onnx-core==2.0.1
+zstandard==0.25.0
+
+## workspace 内存活（不用备份，升级会保留）
+- tools/sdk/android-30.jar (21MB)  ← 编译 Android 用
+- tools/sdk/r8.jar (16MB)          ← d8 转 dex 用
+- overlay/assets/ai-overlay.apk    ← 悬浮窗成品
+- framesrv/build/classes.dex       ← 取帧服务成品

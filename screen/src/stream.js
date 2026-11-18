@@ -40,6 +40,12 @@ const st = {
   // **点击标记**：在推流帧上画出「AI 点在哪」，用户能直接看到操作位置
   marks: [],             // [{ nx, ny, at, kind }]，最多留 3 个
   viewers: new Set(),    // MJPEG 长连接的响应对象
+  // **外部后端（framesrv / ImageReader）**。
+  // 快路径在跑时，stream.json 要报它的端口，不能用 screencap 这条的。
+  // 之前两个写入者抢同一个文件：每次工具调用 setState → writeState，
+  // 就把快路径信息覆盖成慢路径的端口，胶囊因此读到错的那条。
+  extPort: 0,
+  extBackend: '',
   displayId: null,
   focusedApp: '',
   frames: 0,
@@ -260,6 +266,20 @@ function marksToFilters(width) {
   return parts.join(',');
 }
 
+/** 登记外部后端（framesrv）的端口，让 stream.json 报对的端口。 */
+export function setExternalBackend(port, backend = 'imagereader') {
+  st.extPort = Number(port) || 0;
+  st.extBackend = st.extPort ? String(backend) : '';
+  writeState();
+}
+
+/** 清掉外部后端（framesrv 停了）。 */
+export function clearExternalBackend() {
+  st.extPort = 0;
+  st.extBackend = '';
+  writeState();
+}
+
 export function setState(state) {
   const next = String(state || 'idle');
   if (next === st.state) return;
@@ -333,7 +353,11 @@ async function writeState() {
   try {
     await mkdir(STATE_DIR, { recursive: true });
     await writeFile(STATE_FILE, JSON.stringify({
-      port: st.port, running: st.running, startedAt: st.startedAt,
+      // **有外部后端时报它的端口**，否则胶囊会去连死的 screencap 端口
+      port: st.extPort || st.port,
+      backend: st.extBackend || (st.running ? 'screencap' : ''),
+      running: st.extPort ? true : st.running,
+      startedAt: st.startedAt,
       fps: st.fps, width: st.width, displayId: st.displayId,
       focusedApp: st.focusedApp || '',   // 胶囊靠这个显示"AI 在操作 XX"，以前压根没写
       state: st.state,                   // idle/thinking/looking/acting/done/error

@@ -373,6 +373,8 @@ export async function streamStart(args) {
     r = await stream.start({ sfId: s.sfId, displayId: s.displayId, fps, width, focusedApp: focus });
     if (!r.ok) return { text: `推流启动失败：${r.hint}` };
   } else {
+    // **登记外部后端**，让 stream.js 的 writeState 也报 framesrv 的端口
+    try { stream.setExternalBackend(fast.port, 'imagereader'); } catch { /* ignore */ }
     // **快路径在跑 → 把 stream.json 指向 framesrv**，让胶囊读快的这一路。
     // 胶囊读 stream.json 的 port 去取 /frame.jpg 和 /status，
     // framesrv 的这两个端点返回的字段是兼容的（running/frames/fps/aspect）。
@@ -421,6 +423,7 @@ export async function streamStop() {
     await fsrv.stop();
     stoppedFast = true;
   } catch { /* 没起来就算了 */ }
+  try { stream.clearExternalBackend(); } catch { /* ignore */ }
   await stream.stop();
   return { text: stoppedFast
     ? '推流已停止（framesrv 已退出，胶囊和悬浮窗都不再显示画面）。'

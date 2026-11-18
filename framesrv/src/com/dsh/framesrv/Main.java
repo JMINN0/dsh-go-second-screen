@@ -107,7 +107,7 @@ public class Main {
                     // 原来这个进程永不停止：app_process 一直活着，一直编码，
                     // 一直占 1.0 核，直到手机重启或 OOM。
                     long idle = System.currentTimeMillis() - Math.max(lastFetchAt, createdAt);
-                    if (idle > IDLE_EXIT_MS && mjpegClients.isEmpty()) {
+                    if (idle > IDLE_EXIT_MS && mjpegClients.isEmpty()) {   // 有长连接就不退
                         System.out.println("IDLE_EXIT idleMs=" + idle);
                         System.exit(0);
                     }
@@ -277,7 +277,12 @@ public class Main {
                 // **running 必须反映「还在被看」的状态，不能写死 true。**
                 // 写死的话悬浮窗永远认为推流活着，不会自动关；
                 // 审计发现 README 承诺的「推流停了自己消失」因此失效。
-                boolean alive = (System.currentTimeMillis() - lastFetchAt) < IDLE_EXIT_MS;
+                // **活跃 = 最近有人取帧，或者有 MJPEG 长连接挂着。**
+                // 只算 lastFetchAt 是错的：悬浮窗用 MJPEG 长连接，只在连上时取一次，
+                // 之后一直收推送。120 秒后 lastFetchAt 过期 → running 变 false
+                // → 悬浮窗自己 stopSelf 退出（实机玩 MC 时踩到的）。
+                boolean alive = !mjpegClients.isEmpty()
+                        || (System.currentTimeMillis() - lastFetchAt) < IDLE_EXIT_MS;
                 String j = "{\"running\":" + alive + ",\"frames\":" + frames.get()
                         + ",\"fps\":" + fps + ",\"width\":" + outWidth
                         + ",\"aspect\":" + ((double) srcW / srcH) + "}";

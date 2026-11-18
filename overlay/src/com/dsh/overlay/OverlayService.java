@@ -227,9 +227,8 @@ public class OverlayService extends Service {
                         int nw = Math.max(dp(80), startW + (int)(e.getRawX() - downX));
                         int nh = Math.max(dp(60), startH + (int)(e.getRawY() - downY));
                         userW = nw; userH = nh;
-                        img.setMaxWidth(nw);
-                        img.setMaxHeight(nh);
-                        img.requestLayout();
+                        appliedAspect = -1f;   // 强制按新宽度重算
+                        applyAspect();
                         return true;
                     case MotionEvent.ACTION_UP:
                         return true;
@@ -305,15 +304,36 @@ public class OverlayService extends Service {
     private void applyAspect() {
         if (img == null || collapsed) return;
         float a = (aspect > 0.15f && aspect < 8f) ? aspect : 0.5f;
-        if (Math.abs(a - appliedAspect) < 0.01f) return;
+        if (Math.abs(a - appliedAspect) < 0.005f) return;
         appliedAspect = a;
-        int maxW = (userW > 0) ? userW : dp(150);
-        // **高度必须按当前 aspect 算，不能用用户拖出来的死值。**
-        // 原来 userH>0 就直接用 userH，换到横屏 App（aspect 0.45→2.2）时
-        // 画面被塞进竖屏时定死的框里，四周留黑 —— 又变成「大框套小图」。
-        int maxH = Math.min(Math.round(maxW / a), (userH > 0 && userW > 0) ? userH : dp(400));
-        img.setMaxWidth(maxW);
-        img.setMaxHeight(maxH);
+
+        // **用精确尺寸，不用 maxWidth/maxHeight。**
+        // maxWidth+adjustViewBounds 在某些比例下仍会 letterbox（用户报的「黑边」）；
+        // 直接算好宽高等比设置，画面必然填满，一个像素都不剩。
+        int screenW = getResources().getDisplayMetrics().widthPixels;
+        int screenH = getResources().getDisplayMetrics().heightPixels;
+
+        int w;
+        int h;
+        if (userW > 0) {
+            // 用户拖过 → 听用户的宽度，高等比算
+            w = userW;
+            h = Math.max(dp(60), Math.round(w / a));
+        } else {
+            // **默认占屏宽 62%**（原来写死 150dp，横屏内容 2.21 时只有 68dp 高，一条细带）
+            w = Math.round(screenW * 0.62f);
+            h = Math.round(w / a);
+            // 太高的（竖屏内容）限制在屏高 55% 以内，别挡整个屏幕
+            int maxH = Math.round(screenH * 0.55f);
+            if (h > maxH) { h = maxH; w = Math.round(h * a); }
+        }
+        // 宽度也别超过屏宽 92%
+        int capW = Math.round(screenW * 0.92f);
+        if (w > capW) { w = capW; h = Math.round(w / a); }
+
+        img.setLayoutParams(new LinearLayout.LayoutParams(w, h));
+        img.setAdjustViewBounds(false);
+        img.setScaleType(ImageView.ScaleType.FIT_XY);
         img.requestLayout();
     }
 

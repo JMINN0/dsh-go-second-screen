@@ -139,6 +139,18 @@ export function shotSpec() {
       format: { type: 'string', description: 'frames=1 时有效："jpeg"（默认，省 token）或 "png"。' },
       region: {
         type: 'object',
+        // **必须显式声明 additionalProperties**，否则宿主拒绝整个工具的注册：
+        //   register failed: unsupported JSON schema:
+        //   parameters.region.additionalProperties must be explicitly true or false
+        // 诊断日志 dsh-app/diagnostics.md:62 和 :122 两次报过这个。
+        // 后果：vdisplay_shot 这个核心工具一直没注册上，工具列表里少一个。
+        additionalProperties: false,
+        properties: {
+          x: { type: 'integer', description: '左上角 x（显示逻辑像素）' },
+          y: { type: 'integer', description: '左上角 y' },
+          w: { type: 'integer', description: '宽' },
+          h: { type: 'integer', description: '高' },
+        },
         description: '只看屏幕的一块：{x,y,w,h}，坐标用显示逻辑像素（跟 x/y 点按同一套坐标）。把这块按 width 交付，等于放大。'
           + '实测：取 360×796 的局部交付到 420 宽，只要 180 token（全屏要 684），而线性分辨率是全屏的 2 倍。'
           + '看不清某个按钮/数字时用这个，比调大 width 划算。',

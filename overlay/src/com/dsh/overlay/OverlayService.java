@@ -23,6 +23,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -240,14 +241,16 @@ public class OverlayService extends Service {
         void show() {
             if (root != null) return;
 
-            LinearLayout box = new LinearLayout(OverlayService.this);
-            box.setOrientation(LinearLayout.VERTICAL);
-            GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0xE6101216);
-            bg.setCornerRadius(dp(10));
-            bg.setStroke(dp(1), 0x60FFFFFF);
-            box.setBackground(bg);
-            box.setPadding(dp(3), dp(3), dp(3), dp(3));
+            // **FrameLayout：工具条浮在画面上，不占额外高度。**
+            //
+            // 原来是 LinearLayout 竖排（工具条 + 图 + 标签 + 手柄），
+            // chrome 约占 60dp/180px —— 于是：
+            //   ① 窗口比画面大，四周露出深色背景 = 用户说的「黑边」
+            //   ② relayoutAuto 按估算高度排位置，算不准 → 两个窗重叠
+            // 改成叠放后，**窗口尺寸 = 画面尺寸**，一个像素多余空间都没有。
+            FrameLayout box = new FrameLayout(OverlayService.this);
+            // 背景全透明：画面自己铺满，不留任何边框
+            box.setBackgroundColor(0x00000000);
 
             // 顶栏：✕ 关自己 / — 收起
             LinearLayout bar = new LinearLayout(OverlayService.this);
@@ -274,8 +277,17 @@ public class OverlayService extends Service {
                 public void onClick(View v) { toggle(); }
             });
             bar.addView(foldBtn);
-            box.addView(bar, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            // 半透明底，叠在画面右上角，不占布局高度
+            GradientDrawable barBg = new GradientDrawable();
+            barBg.setColor(0x99000000);
+            barBg.setCornerRadius(dp(6));
+            bar.setBackground(barBg);
+            FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+            blp.gravity = Gravity.TOP | Gravity.END;
+            blp.topMargin = dp(2);
+            blp.rightMargin = dp(2);
+            box.addView(bar, blp);
 
             img = new ImageView(OverlayService.this);
             img.setScaleType(ImageView.ScaleType.FIT_XY);
@@ -284,16 +296,27 @@ public class OverlayService extends Service {
             // 帧还没到时整个窗口只剩「✕ — 端口」一条细线，
             // 用户看到的就是「窗口塌了」。
             int phW = Math.round(getResources().getDisplayMetrics().widthPixels * 0.46f);
-            img.setLayoutParams(new LinearLayout.LayoutParams(phW, Math.round(phW * 2.2f)));
-            box.addView(img, new LinearLayout.LayoutParams(phW, Math.round(phW * 2.2f)));
+            // img 铺满整个窗口（MATCH_PARENT）—— 窗口就是画面，没有留白
+            FrameLayout.LayoutParams ilp2 = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+            box.addView(img, ilp2);
 
             label = new TextView(OverlayService.this);
             label.setTextColor(Color.WHITE);
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
             label.setGravity(Gravity.CENTER);
             label.setText("屏 " + port);
-            box.addView(label, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            // 标签浮在底部居中，半透明底，不占布局高度
+            GradientDrawable lbg = new GradientDrawable();
+            lbg.setColor(0x88000000);
+            lbg.setCornerRadius(dp(4));
+            label.setBackground(lbg);
+            label.setPadding(dp(6), dp(1), dp(6), dp(1));
+            FrameLayout.LayoutParams tlp2 = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+            tlp2.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            tlp2.bottomMargin = dp(2);
+            box.addView(label, tlp2);
 
             // 右下缩放手柄
             View handle = new View(OverlayService.this);
@@ -301,8 +324,10 @@ public class OverlayService extends Service {
             hbg.setColor(0x88FFFFFF);
             hbg.setCornerRadius(dp(4));
             handle.setBackground(hbg);
-            LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(dp(18), dp(18));
-            hlp.gravity = Gravity.END;
+            FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(dp(16), dp(16));
+            hlp.gravity = Gravity.BOTTOM | Gravity.END;
+            hlp.bottomMargin = dp(2);
+            hlp.rightMargin = dp(2);
             box.addView(handle, hlp);
             handle.setOnTouchListener(new View.OnTouchListener() {
                 float downX, downY;
@@ -418,13 +443,20 @@ public class OverlayService extends Service {
             int capW = Math.round(screenW * 0.92f);
             if (w > capW) { w = capW; h = Math.round(w / a); }
 
-            img.setLayoutParams(new LinearLayout.LayoutParams(w, h));
-            img.requestLayout();
-            // 记下实际尺寸，并重排所有自动窗口（第一次拿到比例时位置才准）
-            boolean sizeChanged = (curW != w + dp(6) || curH != h + dp(50));
-            curW = w + dp(6);        // 加上内边距和边框
-            curH = h + dp(50);       // 加上工具条 + 标签 + 手柄
-            if (sizeChanged) ui.post(new Runnable() { public void run() { relayoutAuto(); } });
+            // **设的是「窗口」尺寸，不是「图片」尺寸。**
+            // FrameLayout 下 img 是 MATCH_PARENT，窗口多大画面就多大，
+            // 所以窗口永远是「画面尺寸」——一个像素黑边都没有。
+            curW = w;
+            curH = h;
+            if (lp != null) {
+                boolean sizeChanged = (Math.abs(lp.width - w) > 2 || Math.abs(lp.height - h) > 2);
+                lp.width = w;
+                lp.height = h;
+                if (root != null) {
+                    try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
+                }
+                if (sizeChanged) ui.post(new Runnable() { public void run() { relayoutAuto(); } });
+            }
         }
 
         /** 起轮询线程（幂等）。 */

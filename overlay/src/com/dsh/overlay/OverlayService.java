@@ -153,15 +153,31 @@ public class OverlayService extends Service {
         } catch (Throwable t) { /* ignore */ }
     }
 
-    /** 关掉一个窗口（只关这一个）。 */
+    /** 关掉一个窗口（只关这一个）。全关完了就把服务也停掉。 */
     private void removeWin(int p) {
         Win w = wins.remove(p);
         if (w != null) w.close();
         persistPorts();
+        // 对抗审查 #9：原来不更新通知、也不 stopSelf
+        // → 最后一个窗口关了之后，前台通知和空服务永远留着
+        updateNotification();
+        if (wins.isEmpty()) {
+            try { hideRail(); } catch (Throwable t) { /* ignore */ }
+            try { wm.removeView(railView); } catch (Throwable t) { /* ignore */ }
+            railView = null; railKnob = null;
+            try { stopForeground(true); } catch (Throwable t) { /* ignore */ }
+            stopSelf();
+        }
     }
 
     /** 全部关掉。 */
     private void closeAll() {
+        // 对抗审查 #6：滑轨是独立窗口，不清会永远浮在屏幕上（还不可触摸，只能 force-stop）
+        try { hideRail(); } catch (Throwable t) { /* ignore */ }
+        if (railView != null) {
+            try { wm.removeView(railView); } catch (Throwable t) { /* ignore */ }
+            railView = null; railKnob = null;
+        }
         for (Win w : wins.values()) { try { w.close(); } catch (Throwable t) { /* ignore */ } }
         wins.clear();
         persistPorts();
@@ -193,6 +209,22 @@ public class OverlayService extends Service {
      * 2. 自动窗口逐个扫描屏幕，找第一个不和任何障碍物相交的位置
      * 3. 整屏都放不下就缩小到 70% 再试，再不行就叠在角落（极端情况）
      */
+    /**
+     * 窗口数量变了 → 所有「用户没手动调过大小」的窗口都要按新数量重算尺寸。
+     *
+     * **对抗审查发现的 P0**：applyAspect() 只在 aspect 变化时跑，完全不看 wins.size()。
+     * 于是第 1 个窗口按「只有 1 个」定成 668×1478，后面再开第 2、3 个它不会缩，
+     * findFreeSlot 放不下就回退到同一个坐标 → **重叠**。
+     */
+    private void reflowAll() {
+        for (Win w : wins.values()) {
+            if (w.userW > 0 || w.collapsed) continue;   // 用户调过大小/收起的别动
+            w.appliedAspect = -1f;                      // 强制重算
+            w.applyAspect();
+        }
+        relayoutAuto();
+    }
+
     private void relayoutAuto() {
         int screenW = getResources().getDisplayMetrics().widthPixels;
         int screenH = getResources().getDisplayMetrics().heightPixels;
@@ -447,6 +479,10 @@ public class OverlayService extends Service {
             FrameLayout.LayoutParams ilp2 = new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
             box.addView(img, ilp2);
+            // **顶栏必须在图之后 bringToFront。**
+            // FrameLayout 后加的在上层，原来 bar 先加、img 后加 → 第一帧一到就把 ✕/— 盖住了，
+            // 但按钮仍在触摸链里 → 用户点右上角会误关/误收起（对抗审查 #3）。
+            try { bar.bringToFront(); } catch (Throwable t) { /* ignore */ }
 
             label = new TextView(OverlayService.this);
             label.setTextColor(Color.WHITE);
@@ -616,8 +652,8 @@ public class OverlayService extends Service {
             try {
                 wm.addView(root, lp);
                 Log.i(TAG, "窗口已添加 port=" + port + " " + lp.width + "x" + lp.height + " x=" + lp.x + " y=" + lp.y);
-                // **加完立刻重排**：这时所有窗口都已有固定尺寸，碰撞检测才算得准
-                ui.post(new Runnable() { public void run() { relayoutAuto(); } });
+                // **加完立刻重算所有窗口尺寸再重排**（P0：数量变了尺寸要跟着变）
+                ui.post(new Runnable() { public void run() { reflowAll(); } });
             } catch (Exception e) {
                 Log.e(TAG, "加窗口失败 port=" + port + ": " + e.getMessage());
             }
@@ -822,8 +858,9 @@ public class OverlayService extends Service {
             if (now - lastFrameAt < (1000 / capFps)) { dropped++; return; }
             lastFrameAt = now;
             try {
-                // 收起/不可见时不解码 —— 反正用户看不到
-                if (collapsed || root == null || root.getVisibility() != View.VISIBLE) return;
+                // **收起时也解码**：用户要的是「很小的实时画面」，不是冻结帧。
+                // 只是不解码到不可见窗口（被 ✕ 隐藏那种）。
+                if (root == null || root.getVisibility() != View.VISIBLE) return;
                 Bitmap bm = BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
                 if (bm == null) return;
                 final Bitmap fb = bm;
@@ -831,7 +868,10 @@ public class OverlayService extends Service {
                 float a = (float) fb.getWidth() / Math.max(1, fb.getHeight());
                 if (Math.abs(a - aspect) > 0.01f) {
                     aspect = a;
-                    ui.post(new Runnable() { public void run() { applyAspect(); } });
+                    // 收起状态不改尺寸（否则实时刷新会把小预览打回大窗口）
+                    if (!collapsed) {
+                        ui.post(new Runnable() { public void run() { applyAspect(); } });
+                    }
                 }
                 ui.post(new Runnable() {
                     public void run() {

@@ -26,10 +26,30 @@ import android.widget.Toast;
 public class MainActivity extends Activity {
     private static final String TAG = "DshOverlay";
 
+    /**
+     * **singleTask 下必须实现 onNewIntent。**
+     *
+     * 对抗审查发现：manifest 加了 launchMode="singleTask" 之后，
+     * 第二次 `am start` 若落到已有 Activity，会走 onNewIntent 而不是 recreate，
+     * 而原来没实现这个方法 → `--ez stop true` / `--ei port` **被静默丢弃**，
+     * 表现为「点关闭没反应」「新屏不起窗口」。
+     */
+    @Override
+    protected void onNewIntent(Intent it) {
+        super.onNewIntent(it);
+        setIntent(it);
+        try { handleIntent(it); } catch (Throwable t) { Log.w(TAG, "onNewIntent: " + t.getMessage()); }
+    }
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        Intent it = getIntent();
+        handleIntent(getIntent());
+    }
+
+    /** 统一的 Intent 处理入口（onCreate 和 onNewIntent 共用）。 */
+    private void handleIntent(Intent it) {
+        if (it == null) { finish(); return; }
 
         // stop=true → 停服务
         if (it != null && it.getBooleanExtra("stop", false)) {

@@ -449,9 +449,14 @@ export async function streamStart(args) {
   if (!fast.ok) {
     r = await stream.start({ sfId: s.sfId, displayId: s.displayId, fps, width, focusedApp: focus });
     if (!r.ok) return { text: `推流启动失败：${r.hint}` };
+    try { screenPorts.set(Number(s.displayId), r.port); } catch { /* ignore */ }
   } else {
     // **登记外部后端**，让 stream.js 的 writeState 也报 framesrv 的端口
     try { stream.setExternalBackend(fast.port, 'imagereader'); } catch { /* ignore */ }
+    // **必须记下 displayId → port 的映射。**
+    // 对抗审查发现：这个 Map 只有 get/delete、从没 set，
+    // 于是 stop() 取到 0 → overlayStop(undefined) → `--ez stop true` → **关掉所有窗口**。
+    try { screenPorts.set(Number(s.displayId), fast.port); } catch { /* ignore */ }
     // **快路径在跑 → 把 stream.json 指向 framesrv**，让胶囊读快的这一路。
     // 胶囊读 stream.json 的 port 去取 /frame.jpg 和 /status，
     // framesrv 的这两个端点返回的字段是兼容的（running/frames/fps/aspect）。

@@ -84,8 +84,12 @@ public class OverlayService extends Service {
         startForeground(CH_NUM, buildNotification());
     }
 
+    /** 最近一次 startId —— 用来 stopSelf(startId) 精确停，避免多 startId 残留。 */
+    private int lastStartId = -1;
+
     @Override
     public int onStartCommand(Intent it, int flags, int startId) {
+        lastStartId = startId;
         if (it == null) return START_STICKY;
 
         // ① 全停
@@ -550,7 +554,18 @@ public class OverlayService extends Service {
                             if (Math.abs(dx) > dp(6) || Math.abs(dy) > dp(6)) moved = true;
                             if (moved) {
                                 autoPos = false;   // 用户拖过 → 以后重排不动它
-                                lp.x = startX + dx; lp.y = startY + dy;
+                                // **限制在屏幕内，别让窗口被拖到看不见**。
+                                // 实机踩到：窗口被拖到 x=-227，完全跑出左边缘，用户再也点不到。
+                                int sw = getResources().getDisplayMetrics().widthPixels;
+                                int sh = getResources().getDisplayMetrics().heightPixels;
+                                int ww2 = Math.max(dp(40), curW);
+                                int hh2 = Math.max(dp(40), curH);
+                                int minX = -(ww2 - dp(72));          // 至少留 72dp 在屏内
+                                int maxX = sw - dp(72);
+                                int minY = 0;
+                                int maxY = sh - dp(72);
+                                lp.x = Math.max(minX, Math.min(maxX, startX + dx));
+                                lp.y = Math.max(minY, Math.min(maxY, startY + dy));
                                 try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
 
                                 // **拖到屏幕下半部 → 出现删除滑轨**
@@ -608,6 +623,16 @@ public class OverlayService extends Service {
             }
         }
 
+        /** 把窗口位置拉回「至少一部分在屏内」。 */
+        void clampPos(int ww, int hh) {
+            if (lp == null) return;
+            int sw = getResources().getDisplayMetrics().widthPixels;
+            int sh = getResources().getDisplayMetrics().heightPixels;
+            int keep = dp(72);
+            lp.x = Math.max(-(ww - keep), Math.min(sw - keep, lp.x));
+            lp.y = Math.max(0, Math.min(sh - keep, lp.y));
+        }
+
         void toggle() {
             collapsed = !collapsed;
             // **最小化时不隐藏画面** —— 用户要的是「很小的实时画面标识」，
@@ -621,6 +646,7 @@ public class OverlayService extends Service {
                 if (smallH > dp(120)) smallH = dp(120);
                 if (lp != null) {
                     lp.width = smallW; lp.height = smallH;
+                    clampPos(smallW, smallH);
                     try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
                 }
                 if (label != null) label.setText("屏 " + port);
@@ -631,7 +657,12 @@ public class OverlayService extends Service {
                 label.setText("屏 " + port);
                 label.setTextSize(TypedValue.COMPLEX_UNIT_SP, collapsed ? 11 : 10);
             }
-            if (!collapsed) { appliedAspect = -1f; applyAspect(); }
+            if (!collapsed) {
+                appliedAspect = -1f;
+                applyAspect();
+                clampPos(curW > 0 ? curW : dp(200), curH > 0 ? curH : dp(200));
+                if (lp != null) { try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ } }
+            }
         }
 
         /** 按真实比例设定显示尺寸（精确尺寸，避免 letterbox）。 */

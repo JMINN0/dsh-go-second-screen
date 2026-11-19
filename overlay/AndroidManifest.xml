@@ -21,8 +21,11 @@
         <!-- 故意不加 LAUNCHER intent-filter，这样它不会出现在桌面和应用列表里。
              启动方式只有 adb shell am start（参数用 ei port 传端口），
              插件会自动这样做，用户不需要手动启动。 -->
+        <!-- **必须 singleTask**：重复 am start 不能堆出多个 Activity/进程。
+             实机踩到过两个 overlay 进程同时存在、旧窗口残留 4 个的情况。 -->
         <activity android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />

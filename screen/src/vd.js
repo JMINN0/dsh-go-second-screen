@@ -398,8 +398,16 @@ export async function start({ width = 0, height = 0, dpi = 320, systemDecoration
      * 现在的取舍：**拆掉一个正在用的屏，代价远大于配置和请求不一致**。
      * 所以活着就复用，把差异如实说出来，让调用方自己决定要不要 stop 再建。
      */
-    if (await alive()) {
-      const fl = await shell('dumpsys display 2>/dev/null | grep "DisplayDeviceInfo.*scrcpy" | head -1');
+    // **复用检查带 1.5 秒 TTL**：连着截图时省掉 3 次 dumpsys（实测省 ~250ms/次）。
+    const nowReuse = Date.now();
+    const reuseFresh = lastReuseResult && (nowReuse - lastReuseCheckAt) < REUSE_TTL_MS;
+    const isAlive = reuseFresh ? lastReuseResult.alive : await alive();
+    if (!reuseFresh) { lastReuseCheckAt = nowReuse; lastReuseResult = { alive: isAlive }; }
+    if (isAlive) {
+      const fl = reuseFresh && lastReuseResult.fl
+        ? lastReuseResult.fl
+        : await shell('dumpsys display 2>/dev/null | grep "DisplayDeviceInfo.*scrcpy" | head -1');
+      if (!reuseFresh) lastReuseResult.fl = fl;
       const wantW = width; const wantH = height;
       const diff = [];
       if (wantW && wantH && (wantW !== state.width || wantH !== state.height)) {
@@ -734,7 +742,42 @@ async function resolveScrcpySfId() {
 }
 
 /** 确保 state.sfId 是当前有效的；变了就更新，**不重建屏**。 */
-async function refreshSfId() {
+/**
+ * `start()` 的复用检查缓存。
+ *
+ * **为什么必须有**：实测 `shot()` 单张 623ms，而 screencap 本身只要 225ms。
+ * 差的 400ms 里，大头是 `start()` 每次都要:
+ *   alive() → displayIds() + sfIds()     = 2 次 dumpsys
+ *   复用分支 → DisplayDeviceInfo          = 1 次 dumpsys
+ * 同一个操作序列里连着截图/OCR/模板匹配，这些查询全是重复的。
+ *
+ * 缓存 1.5 秒：正常操作节奏（每步几百毫秒）内不会过期；
+ * 真转屏/屏死时，screencap 失败会触发强制刷新（captureAndConvert 有兜底）。
+ */
+const REUSE_TTL_MS = 1500;
+let lastReuseCheckAt = 0;
+let lastReuseResult = null;
+
+/**
+ * 刷新 SurfaceFlinger id。
+ *
+ * **实测：这个函数每次调用要 ~150-400ms**（内部 dumpsys + grep），
+ * 而 `vd.shot()` 每张截图都会调它 → 单张截图从 225ms 涨到 623ms。
+ * 所有基于截图的工具（OCR、模板匹配、指纹）都被这个拖慢。
+ *
+ * 加 2 秒 TTL：同一个操作序列里连着截图不会重复查。
+ * 转屏时 id 会变，但下次 TTL 过期就会重新解析；而且 screencap 失败时
+ * 会强制刷新（下面 captureAndConvert 里有兜底）。
+ */
+const SFID_TTL_MS = 2000;
+let lastSfIdCheckAt = 0;
+
+async function refreshSfId(force = false) {
+  const now = Date.now();
+  if (!force && state.sfId && (now - lastSfIdCheckAt) < SFID_TTL_MS) {
+    return state.sfId;                      // **缓存命中，省掉 150-400ms 的 dumpsys**
+  }
+  lastSfIdCheckAt = now;
   if (!state.sfId) { const r = await resolveScrcpySfId(); if (r) state.sfId = r; return state.sfId; }
   const cur = await resolveScrcpySfId();
   if (!cur) return state.sfId;              // 查不到（可能刚好在转屏瞬间）→ 先用旧的
@@ -814,6 +857,8 @@ function forget(reason) {
   state.displayId = null; state.sfId = null; state.scid = null; state.port = null;
   state.lastShotHash = null; state.lastShotPath = null; state.lastShotImgWidth = 0;
   state.lastShotRegion = null;   // 尺寸/位置基准作废，否则 input 会按旧 region 换算
+  lastReuseResult = null;        // **复用检查缓存也作废**，否则新建屏后还在用旧的判定
+  lastReuseCheckAt = 0;
   clearPersistedState();         // **盘上的记录也清掉**，否则下个进程会去复用死屏
   // **hwcPrev 必须清掉**：不清的话，重建时 getprop 已经是 1，于是 hwcPrev 被记成 '1'，
   // stop 时又恢复成 1，全局 debug.sf.enable_hwc_vds 残到重启（对抗审查 S1）。

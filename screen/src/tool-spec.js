@@ -655,3 +655,103 @@ export function keepAliveSpec() {
     output: out('新的超时设定和含义。'),
   };
 }
+
+/** 模板匹配找图 —— 找「没有文字的东西」的唯一快路。 */
+export function findImageSpec() {
+  return {
+    name: 'vdisplay_find_image',
+    description: [
+      '用模板匹配找图上的图案（不点击）。**这是找「没有文字的东西」的唯一快速方法。**',
+      '',
+      '适合：图标、开关、返回箭头、技能格、红心、血条、准星、任何纯图形元素。',
+      'OCR 读不到这些（它们没有文字），而模板匹配实测只要 **5-30ms**（OCR 是 1600ms）。',
+      '',
+      '怎么用：先用 vdisplay_shot 截一张图，把要反复找的那块裁出来存成 PNG 文件，',
+      '之后就能反复用它定位。模板要选「有特征」的一块 —— 纯色块也能匹配（自动切 SQDIFF），',
+      '但有一点纹理更稳。',
+      '',
+      '找不到时可以：调低 threshold（0.6-0.7）、换一块更清晰的模板、或改用 vdisplay_find（找文字）。',
+    ].join('\n'),
+    parameters: {
+      template: { type: 'string', required: true, description: '模板图片路径（PNG/JPG，在设备可读的文件系统上）' },
+      threshold: { type: 'number', description: '匹配阈值 0-1，默认 0.75。低了误报多，高了漏检' },
+      region: { type: 'object', additionalProperties: false, properties: { x: { type: 'integer' }, y: { type: 'integer' }, w: { type: 'integer' }, h: { type: 'integer' } }, description: '只在屏幕这一块里找（省时间，也能避免找错地方）' },
+    },
+    output: out('找到没、score、屏幕坐标、中心 nx/ny。'),
+  };
+}
+
+/** 找到图并点它。 */
+export function tapImageSpec() {
+  return {
+    name: 'vdisplay_tap_image',
+    description: [
+      '用模板匹配找到图案并点击它。一步完成找+点，适合点图标类的东西。',
+      '',
+      '有文字的东西用 vdisplay_tap_text（更准），没文字的东西用这个。',
+    ].join('\n'),
+    parameters: {
+      template: { type: 'string', required: true, description: '模板图片路径' },
+      threshold: { type: 'number', description: '匹配阈值，默认 0.75' },
+      region: { type: 'object', additionalProperties: false, properties: { x: { type: 'integer' }, y: { type: 'integer' }, w: { type: 'integer' }, h: { type: 'integer' } }, description: '只在这块里找' },
+    },
+    output: out('点到了没、坐标、匹配分数。'),
+  };
+}
+
+/** 界面指纹。 */
+export function fingerprintSpec() {
+  return {
+    name: 'vdisplay_fingerprint',
+    description: [
+      '算当前界面的 64 位指纹，用来判断「还是不是同一个界面」。',
+      '',
+      '比截图比对便宜（7ms vs 143ms），比 OCR 可靠（不依赖文字 —— 游戏/图片界面也能用）。',
+      '两次调用会给出汉明距离：0 = 完全相同，≤10 = 同一界面，>10 = 不同界面。',
+      '',
+      '用途：判断操作有没有生效、判断页面跳转了没、给方法缓存做键。',
+    ].join('\n'),
+    parameters: {
+      key: { type: 'string', description: '独立记录的槽位名，默认 default。不同任务用不同 key，互不干扰' },
+    },
+    output: out('指纹、和上次的汉明距离、是否变了界面。'),
+  };
+}
+
+/** 屏幕差异。 */
+export function screenDiffSpec() {
+  return {
+    name: 'vdisplay_diff',
+    description: [
+      '算当前画面和上一次的差异（MAD + 最大格差）。',
+      '',
+      '**maxCell 是关键**：全局 MAD 会被大片静态背景稀释 —— 一个数字变了，MAD 可能只有 0.0012',
+      '但 maxCell 有 0.31。只看 MAD 会漏掉小区域变化。',
+      '',
+      '第一次调用只记录，第二次起才给差异。用来判断「我这一下操作到底有没有生效」。',
+    ].join('\n'),
+    parameters: {
+      before: { type: 'string', description: '指定「之前的图」路径。省略则自动和上一张比' },
+    },
+    output: out('MAD、maxCell、变没变。'),
+  };
+}
+
+/** 界面方法探测。 */
+export function probeScreenSpec() {
+  return {
+    name: 'vdisplay_probe',
+    description: [
+      '探测当前界面适合用什么识别方法，并给出建议。',
+      '',
+      '量三个东西：边缘密度（5-18% 适合形状/模板）、颜色集中度（色数少才好用）、亮度和对比。',
+      '',
+      '**什么时候调**：第一次操作某个 App 时先探一次，之后按建议选方法 ——',
+      '文字多的界面用 OCR，图形界面用模板匹配，纯色状态用颜色检测。',
+      '',
+      '也用来识别「画面是不是空白」（FLAG_SECURE 或者还没加载完）。',
+    ].join('\n'),
+    parameters: {},
+    output: out('边缘/颜色/亮度统计 + 方法建议。'),
+  };
+}

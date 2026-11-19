@@ -835,6 +835,198 @@ export function keepAlive(args) {
   return { text: lines.join('\n'), minutes: r.minutes };
 }
 
+
+/* ═══════════════ 视觉方法（OpenCV，常驻助手）═══════════════
+ *
+ * 这些工具之前完全没有 —— 只有 OCR（文字）和截图（给模型看）。
+ * 加了之后，「找没有文字的东西」终于有路了：
+ *   图标、开关、技能格、血条、准星、红心、返回箭头 …
+ *
+ * 实测耗时（tests/CV-BENCHMARK-ARM.md，1592×720）：
+ *   模板匹配 5.7ms（温）/ 16-30ms（Node 往返）
+ *   指纹 7ms、差分 2.3ms、颜色 6.8ms、边缘 0.7ms
+ *
+ * 对比 OCR 的 1600ms —— 快 100-280 倍。
+ */
+
+/**
+ * 截一张原分辨率 PNG 给 CV 用（不缩放，缩放会丢模板精度）。
+ *
+ * **不要先调 vd.status()** —— 它内部又走一遍 alive()（2 次 dumpsys）+ 一次
+ * dumpsys window displays，实测多花 ~250ms。vd.shot() 自己会做必要的检查。
+ */
+async function grabFullPng() {
+  const shot = await vd.shot('/tmp', { width: 1080, format: 'png' });
+  if (!shot.ok) {
+    return { ok: false, hint: String(shot.hint || '').includes('没在运行')
+      ? '虚拟屏没在运行。先 vdisplay_start。'
+      : `截图失败：${shot.hint}` };
+  }
+  return { ok: true, path: shot.path, width: shot.width, height: shot.height };
+}
+
+/**
+ * 模板匹配找图。**这是找「没有文字的东西」的唯一快路。**
+ *
+ * 用法：先 `vdisplay_shot` 看一眼，把目标图标的位置告诉 AI，
+ * 或者 AI 自己截一小块存成模板文件，之后就能反复找。
+ */
+export async function findImage(args) {
+  const tpl = String(args?.template || '').trim();
+  if (!tpl) return { text: '要给模板图路径（PNG/JPG）。先用 vdisplay_shot 截图，再裁出目标存成文件。' };
+  const { existsSync } = await import('node:fs');
+  if (!existsSync(tpl)) return { text: `模板文件不存在：${tpl}` };
+
+  const g = await grabFullPng();
+  if (!g.ok) return { text: g.hint };
+
+  const V = await import('./vision.js');
+  const r = await V.match(g.path, tpl, {
+    region: args?.region || null,
+    threshold: args?.threshold === undefined ? 0.75 : Number(args.threshold),
+  });
+  if (!r.ok) return { text: `模板匹配失败：${r.hint}` };
+
+  const lines = [
+    r.found
+      ? `✅ 找到目标（score ${r.score} ≥ 阈值 ${r.threshold}）`
+      : `❌ 没找到（最高分 ${r.score} < 阈值 ${r.threshold}）`,
+    `模板：${tpl}（内部标准差 ${r.tplStd}，用 ${r.method}）`,
+    `位置：屏幕 (${r.x}, ${r.y}) 大小 ${r.w}×${r.h} → 中心 nx=${r.cx} ny=${r.cy}`,
+    `耗时 ${r.elapsedMs}ms`,
+  ];
+  if (!r.found) {
+    lines.push('', '可以试：① 调低 threshold（0.6-0.7）② 模板换成更清晰的一块 ③ 换用 OCR 找文字');
+  } else {
+    lines.push('', '要直接点它，用 vdisplay_tap_image（它会自己找再点）。');
+  }
+  return { text: lines.join('\n'), found: r.found, nx: r.cx, ny: r.cy, score: r.score };
+}
+
+/** 找到图并点它。 */
+export async function tapImage(args) {
+  const r = await findImage(args);
+  if (!r.found) return r;
+  const t = await input({ kind: 'tap', nx: r.nx, ny: r.ny, verify: false });
+  const ok = !/失败|不允许/.test(String(t.text || ''));
+  return {
+    text: `${ok ? '✅ 已点击模板目标' : '⚠️ 注入可能失败'}（nx=${r.nx} ny=${r.ny}，score ${r.score}）`,
+    clicked: ok, nx: r.nx, ny: r.ny,
+  };
+}
+
+/**
+ * 界面指纹（64 位 dHash）。
+ *
+ * 用途：判断「现在是不是那个界面」——比截图比对便宜得多（7ms vs 143ms），
+ * 也比 OCR 可靠（不依赖文字）。
+ */
+export async function fingerprint(args) {
+  const g = await grabFullPng();
+  if (!g.ok) return { text: g.hint };
+  const V = await import('./vision.js');
+  const r = await V.dhash(g.path);
+  if (!r.ok) return { text: `指纹失败：${r.hint}` };
+
+  // 和上次的比，判断界面变了没
+  const { readFile, writeFile } = await import('node:fs/promises');
+  const key = String(args?.key || 'default');
+  const store = '/tmp/dsh-fp-' + key + '.json';
+  let prev = null;
+  try { prev = JSON.parse(await readFile(store, 'utf8')); } catch { /* 没有上次 */ }
+
+  let dist = null;
+  if (prev && prev.hash) {
+    // 汉明距离
+    let d = 0;
+    const a = BigInt('0x' + prev.hash), b = BigInt('0x' + r.hash);
+    let x = a ^ b;
+    while (x) { d += Number(x & 1n); x >>= 1n; }
+    dist = d;
+  }
+  try { await writeFile(store, JSON.stringify({ hash: r.hash, at: Date.now() })); } catch { /* ignore */ }
+
+  const lines = [
+    `界面指纹：${r.hash}（${r.w}×${r.h}，${r.elapsedMs}ms）`,
+    prev ? `上次：${prev.hash} → 汉明距离 ${dist} ${dist === 0 ? '（完全相同的界面）' : dist <= 10 ? '（同一界面，变了点细节）' : '（不同界面）'}` : '（第一次记录）',
+  ];
+  return { text: lines.join('\n'), hash: r.hash, distance: dist, changed: dist === null ? null : dist > 10 };
+}
+
+/**
+ * 两张截图的差异（MAD + maxCell）。
+ *
+ * **maxCell 是关键**：全局 MAD 会被大面积静态背景稀释，
+ * 小区域变化（比如一个数字变了）MAD 可能只有 0.0012 但 maxCell 有 0.31。
+ */
+export async function screenDiff(args) {
+  const a = String(args?.before || '').trim();
+  const g = await grabFullPng();
+  if (!g.ok) return { text: g.hint };
+  if (!a) {
+    // 没有 before 就和上一张比
+    const { readFile, writeFile } = await import('node:fs/promises');
+    const store = '/tmp/dsh-lastshot.json';
+    let prev = null;
+    try { prev = JSON.parse(await readFile(store, 'utf8')); } catch { /* ignore */ }
+    try { await writeFile(store, JSON.stringify({ path: g.path, at: Date.now() })); } catch { /* ignore */ }
+    if (!prev || !prev.path) {
+      return { text: `已记录当前画面（${g.path}）。再调一次就能看差异。`, first: true };
+    }
+    args = { ...args, before: prev.path };
+  }
+
+  const V = await import('./vision.js');
+  const r = await V.diff(args.before, g.path);
+  if (!r.ok) return { text: `差异计算失败：${r.hint}` };
+  return {
+    text: [
+      `差异：MAD ${r.mad}，最大格 ${r.maxCell}（在 ${r.maxCellAt.gx},${r.maxCellAt.gy} 格）`,
+      `判定：${r.changed ? '画面有实质变化' : '画面基本没变'}`,
+      `（MAD 会被大片静态背景稀释，小区域变化要看 maxCell）`,
+      `耗时 ${r.elapsedMs}ms`,
+    ].join('\n'),
+    mad: r.mad, maxCell: r.maxCell, changed: r.changed,
+  };
+}
+
+/**
+ * 探测当前界面适合用什么识别方法。
+ *
+ * 这是「按 App 自动选方法」的第一步：先量，再选。
+ * 返回边缘密度、颜色可分性、亮度对比，据此判断：
+ *   边缘密度 5-18% 且对比够 → 模板匹配可用
+ *   颜色 top5 占比高且色数少 → 颜色/连通域可用
+ *   看起来空白 → 可能 FLAG_SECURE 或没加载完
+ */
+export async function probeScreen(args) {
+  const g = await grabFullPng();
+  if (!g.ok) return { text: g.hint };
+  const V = await import('./vision.js');
+  const r = await V.probe(g.path);
+  if (!r.ok) return { text: `探测失败：${r.hint}` };
+
+  const recs = [];
+  if (r.looksBlank) recs.push('⚠️ 画面接近空白 —— 可能是 FLAG_SECURE 或界面没加载完');
+  if (r.canTemplate) recs.push('✅ 模板匹配可用（边缘 5-30%、对比够）');
+  else recs.push('⚠️ 模板匹配可能不稳（边缘太密或太少）');
+  if (r.canColor) recs.push('✅ 颜色/连通域可用（色块集中）');
+  else recs.push('⚠️ 颜色方法可能不稳（颜色太杂）');
+  recs.push('ℹ️ OCR 永远可用（文字是另一条路）');
+
+  return {
+    text: [
+      `界面 ${r.w}×${r.h}，耗时 ${r.elapsedMs}ms`,
+      `边缘密度 ${r.edgeDensity}（5-18% 适合形状检测）`,
+      `颜色：top5 占比 ${r.colorTop5}，色数 ${r.colorCount}（色数少才好用）`,
+      `亮度 ${r.brightness}，对比 ${r.contrast}`,
+      '',
+      ...recs,
+    ].join('\n'),
+    data: r,
+  };
+}
+
 export async function userState() {
   const target = await adbTarget();
   const run = (cmd) => new Promise((resolve) => {

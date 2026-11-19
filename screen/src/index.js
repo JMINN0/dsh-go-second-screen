@@ -17,6 +17,7 @@ import {
   liveSpec, liveShotSpec, waitStableSpec, roiSpec, probeSecureSpec,
   // 按文字找/点（2026-11-19）：消掉模型自己算坐标的 17.6% 点空率
   findTextSpec, tapTextSpec, keepAliveSpec,
+  findImageSpec, tapImageSpec, fingerprintSpec, screenDiffSpec, probeScreenSpec,
 } from './tool-spec.js';
 import * as T from './tools.js';
 
@@ -110,6 +111,12 @@ export async function apply(ctx) {
               [tapTextSpec, (a) => T.tapText(a)],
               // 后台屏生命周期（2026-11-19）：让 AI 按任务预估空闲超时
               [keepAliveSpec, (a) => T.keepAlive(a)],
+              // 视觉方法（2026-11-19）：模板/指纹/差分/探测，全部基于常驻 OpenCV
+              [findImageSpec, (a) => T.findImage(a)],
+              [tapImageSpec, (a) => T.tapImage(a)],
+              [fingerprintSpec, (a) => T.fingerprint(a)],
+              [screenDiffSpec, (a) => T.screenDiff(a)],
+              [probeScreenSpec, (a) => T.probeScreen(a)],
           ];
           for (const [spec, exec] of defs) {
             try {

@@ -473,6 +473,9 @@ export async function streamStop() {
 }
 
 export async function closeAll() {
+  // **视觉助手也要关。** 和 OCR 当初同款泄漏：OpenCV 常驻进程占 80-150MB，
+  // 不关就成孤儿进程（对抗审查发现的 P0）。
+  try { const v = await import('./vision.js'); v.shutdown(); } catch { /* ignore */ }
   await stream.shutdown();
   // **OCR 的 Python 常驻进程必须在这里关掉。**
   // 不关的话：用过一次 vdisplay_text 之后，插件卸载/引擎重启/daemon 闲置自杀
@@ -905,15 +908,39 @@ export async function findImage(args) {
   return { text: lines.join('\n'), found: r.found, nx: r.cx, ny: r.cy, score: r.score };
 }
 
-/** 找到图并点它。 */
+/**
+ * 找到图并点它。
+ *
+ * **不能无条件报成功。** 原来传 verify:false 然后检查文本里有没有"失败"，
+ * 但 verify:false 时 input() 的文本恒为「已在 display=N 注入 tap」，
+ * 永远不含"失败" → ok 恒 true。屏死、坐标出屏、控件不可点全报「✅ 已点击」，
+ * AI 会以为点了购买/发送其实什么都没发生（对抗审查发现的 P0）。
+ *
+ * 现在照 tapText 的做法：点前后各取一次画面指纹，如实说变没变。
+ */
 export async function tapImage(args) {
   const r = await findImage(args);
   if (!r.found) return r;
+  const V = await import('./vision.js');
+  const g1 = await grabFullPng();
+  const before = g1.ok ? (await V.dhash(g1.path)).hash : null;
+
   const t = await input({ kind: 'tap', nx: r.nx, ny: r.ny, verify: false });
-  const ok = !/失败|不允许/.test(String(t.text || ''));
+  const injected = t.ok !== false;
+  await new Promise((res) => setTimeout(res, 900));
+
+  const g2 = await grabFullPng();
+  const after = g2.ok ? (await V.dhash(g2.path)).hash : null;
+  const pageChanged = !!(before && after && before !== after);
+
+  const verdict = !injected
+    ? '⚠️ 注入失败'
+    : pageChanged
+      ? '✅ 点击已生效（画面变了）'
+      : '✅ 已点击，但画面没变（可能是开关类控件，或这一下没打到可点的地方）';
   return {
-    text: `${ok ? '✅ 已点击模板目标' : '⚠️ 注入可能失败'}（nx=${r.nx} ny=${r.ny}，score ${r.score}）`,
-    clicked: ok, nx: r.nx, ny: r.ny,
+    text: `${verdict}\n模板目标 nx=${r.nx} ny=${r.ny}（score ${r.score}）\n画面：${pageChanged ? '变了' : '没变'}`,
+    clicked: injected, pageChanged, nx: r.nx, ny: r.ny,
   };
 }
 
@@ -932,14 +959,16 @@ export async function fingerprint(args) {
 
   // 和上次的比，判断界面变了没
   const { readFile, writeFile } = await import('node:fs/promises');
-  const key = String(args?.key || 'default');
+  // **必须清洗 key**：原来直接用，传 "../../etc/passwd" 会写到 /etc/passwd.json
+  // （root 下可写），读侧同样能读任意 .json 并回显内容。
+  const key = String(args?.key || 'default').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'default';
   const store = '/tmp/dsh-fp-' + key + '.json';
   let prev = null;
   try { prev = JSON.parse(await readFile(store, 'utf8')); } catch { /* 没有上次 */ }
 
   let dist = null;
-  if (prev && prev.hash) {
-    // 汉明距离
+  if (prev && prev.hash && /^[0-9a-f]{16}$/i.test(String(prev.hash))) {
+    // 汉明距离（先校验格式，缓存文件被写坏时 BigInt 会抛 SyntaxError 冒到工具层）
     let d = 0;
     const a = BigInt('0x' + prev.hash), b = BigInt('0x' + r.hash);
     let x = a ^ b;
@@ -1090,16 +1119,31 @@ export async function findColor(args) {
   return { text: lines.join('\n'), count: r.count, boxes: r.boxes, biggest: r.boxes[0] };
 }
 
-/** 找颜色并点最大的那个色块。 */
+/** 找颜色并点最大的那个色块。校验同 tapImage —— 不能无条件报成功。 */
 export async function tapColor(args) {
   const r = await findColor(args);
   if (!r.count) return r;
   const b = r.biggest;
+  const V = await import('./vision.js');
+  const g1 = await grabFullPng();
+  const before = g1.ok ? (await V.dhash(g1.path)).hash : null;
+
   const t = await input({ kind: 'tap', nx: b.cx, ny: b.cy, verify: false });
-  const ok = !/失败|不允许/.test(String(t.text || ''));
+  const injected = t.ok !== false;
+  await new Promise((res) => setTimeout(res, 900));
+
+  const g2 = await grabFullPng();
+  const after = g2.ok ? (await V.dhash(g2.path)).hash : null;
+  const pageChanged = !!(before && after && before !== after);
+
+  const verdict = !injected
+    ? '⚠️ 注入失败'
+    : pageChanged
+      ? '✅ 点击已生效（画面变了）'
+      : '✅ 已点击，但画面没变（可能不是可点区域）';
   return {
-    text: `${ok ? '✅ 已点击最大色块' : '⚠️ 注入可能失败'}（${b.w}×${b.h}，中心 nx=${b.cx} ny=${b.cy}）`,
-    clicked: ok, nx: b.cx, ny: b.cy,
+    text: `${verdict}\n色块 ${b.w}×${b.h} 中心 nx=${b.cx} ny=${b.cy}\n画面：${pageChanged ? '变了' : '没变'}`,
+    clicked: injected, pageChanged, nx: b.cx, ny: b.cy,
   };
 }
 

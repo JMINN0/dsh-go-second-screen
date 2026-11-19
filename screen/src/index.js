@@ -146,6 +146,9 @@ export async function apply(ctx) {
     // **卸载时把常驻子进程关掉。** 不关的话 OCR 的 python3 会变成孤儿，
     // 带着 15MB 模型一直占内存，重载一次多一个（对抗审查第三轮 S3）。
     try { const ocr = await import('./ocr.js'); ocr.shutdown(); } catch { /* 没加载过就算了 */ }
+    // **视觉助手同样要关。** OpenCV 常驻进程占 80-150MB，不关就是孤儿
+    // （和 OCR 同款泄漏，视觉功能是后加的，当时漏了 —— 对抗审查 S4）。
+    try { const vis = await import('./vision.js'); vis.shutdown(); } catch { /* 没加载过就算了 */ }
     try {
       const vd = await import('./vd.js');
       const st = await vd.status().catch(() => null);

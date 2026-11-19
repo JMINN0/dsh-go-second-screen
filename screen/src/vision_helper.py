@@ -87,10 +87,16 @@ def op_diff(req):
     ch, cw = max(1, d.shape[0] // GH), max(1, d.shape[1] // GW)
     cells = d[:ch*GH, :cw*GW].reshape(GH, ch, GW, cw).mean(axis=(1, 3))
     idx = int(cells.argmax())
+    # **归一化到 0-1 再判断。**
+    # 原来用 0-255 原始灰度差（mad>0.5、maxCell>8），
+    # 而 PERF-AUDIT 标定的是归一化值（mad>0.005、maxCell>0.15）。
+    # maxCell>8 等同于归一化 0.031，比标定敏感 5 倍 → 秒数/光标/动画都判「有实质变化」。
+    mc = float(cells.max())
     return {
-        'ok': True, 'mad': round(mad, 4), 'maxCell': round(float(cells.max()), 4),
+        'ok': True, 'mad': round(mad / 255.0, 5), 'maxCell': round(mc / 255.0, 4),
+        'madRaw': round(mad, 3), 'maxCellRaw': round(mc, 2),
         'maxCellAt': {'gx': idx % GW, 'gy': idx // GW},
-        'changed': bool(mad > 0.5 or cells.max() > 8),
+        'changed': bool((mad / 255.0) > 0.005 or (mc / 255.0) > 0.15),
     }
 
 
@@ -100,8 +106,12 @@ def op_match(req):
 
     返回最佳匹配的 score 和坐标（引擎坐标系，已加回 region 偏移）。
     """
-    img = _load(req['image'])
-    img, ox, oy = _region(img, req.get('region'))
+    img0 = _load(req['image'])
+    # **必须先记原始尺寸。**
+    # _region 之后 img 已经是被裁剪的块，用它的 shape 当分母算出来的 cx/cy
+    # 是「region 内占比」，但调用方当成整屏 nx/ny 用 → 点歪到屏幕中间。
+    H0, W0 = img0.shape[:2]
+    img, ox, oy = _region(img0, req.get('region'))
     tpl = _load(req['template'])
     H, W = img.shape[:2]
     th, tw = tpl.shape[:2]
@@ -114,6 +124,10 @@ def op_match(req):
     # 实测：从同一张图裁一块纯红矩形当模板，score=0.0、found=false。
     # 这种模板改用 TM_SQDIFF_NORMED（越小越好），再把分数反转成「越大越好」。
     tplStd = float(cv2.cvtColor(tpl, cv2.COLOR_BGR2GRAY).std())
+    # **纯黑模板会永远匹配失败**：SQDIFF_NORMED 的分母趋零，OpenCV 直接置 1，
+    # 1-1=0 → score 恒 0。提前拒绝，给可操作的提示。
+    if tplStd < 0.5:
+        return {'ok': False, 'hint': '模板几乎是单一颜色（含全黑），匹配不可靠。换一块有纹理的模板，或用 vdisplay_find_color'}
     lowVar = tplStd < 6.0
     method = cv2.TM_SQDIFF_NORMED if lowVar else cv2.TM_CCOEFF_NORMED
 
@@ -159,8 +173,8 @@ def op_match(req):
     return {
         'ok': True, 'found': bool(found), 'score': round(float(score), 4),
         'x': int(fx + ox), 'y': int(fy + oy), 'w': int(tw), 'h': int(th),
-        'cx': round((fx + ox + tw / 2.0) / img.shape[1], 4),
-        'cy': round((fy + oy + th / 2.0) / img.shape[0], 4),
+        'cx': round((fx + ox + tw / 2.0) / W0, 4),
+        'cy': round((fy + oy + th / 2.0) / H0, 4),
         'threshold': thr,
         'method': 'SQDIFF' if lowVar else 'CCOEFF',
         'tplStd': round(tplStd, 1),
@@ -172,11 +186,16 @@ def op_color(req):
     颜色阈值 + 连通域。
     **必须用 Lab 的 a/b 通道**，不能用绝对 RGB —— HDR/色偏会让 RGB 阈值失效。
     """
-    img = _load(req['image'])
-    img, ox, oy = _region(img, req.get('region'))
+    img0 = _load(req['image'])
+    H0, W0 = img0.shape[:2]        # 同上：归一化必须用原始尺寸
+    img, ox, oy = _region(img0, req.get('region'))
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
     tol = int(req.get('tolerance', 20))
     tgt = req.get('target')          # {a: 128, b: 128, l: 128} 或 {r,g,b}
+    # **兼容 b2**：旧 schema 里 Lab 的 b 被写成 b2（怕和 RGB 的 b 撞名），
+    # 但实现读的是 'b' → KeyError。这里两个都认。
+    if tgt and 'b2' in tgt and 'b' not in tgt:
+        tgt = dict(tgt); tgt['b'] = tgt['b2']
     if tgt and 'a' in tgt:
         a, b, l = int(tgt['a']), int(tgt['b']), int(tgt.get('l', 128))
         lo = np.array([max(0, l - tol), max(0, a - tol), max(0, b - tol)])
@@ -201,7 +220,7 @@ def op_color(req):
             continue
         boxes.append({
             'x': int(x + ox), 'y': int(y + oy), 'w': int(w), 'h': int(h), 'area': int(area),
-            'cx': round((x + ox + w / 2.0) / W, 4), 'cy': round((y + oy + h / 2.0) / H, 4),
+            'cx': round((x + ox + w / 2.0) / W0, 4), 'cy': round((y + oy + h / 2.0) / H0, 4),
         })
     boxes.sort(key=lambda b: -b['area'])
     return {'ok': True, 'count': len(boxes), 'boxes': boxes[:int(req.get('max', 20))]}

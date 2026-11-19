@@ -1500,7 +1500,11 @@ async function frameHash() {
     return r.ok && r.out ? r.out : null;
   };
   let buf = await capOnce();
-  if (!buf) { await refreshSfId(); buf = await capOnce(); }   // 卡在转屏瞬间时重试一次
+  // **必须传 true 强制刷新。**
+  // refreshSfId() 加了 2 秒 TTL，这里刚刷过就会命中缓存拿到同一个失效 id，
+  // 于是两次 capOnce 都失败 → 返回 null → changed=null → ok:true，
+  // 注释里说的「校验被静默关闭」又被 TTL 关回去了（对抗审查指出）。
+  if (!buf) { await refreshSfId(true); buf = await capOnce(); }
   if (!buf) return null;
   const { createHash } = await import('node:crypto');
   return createHash('sha1').update(buf, 'utf8').digest('hex');
@@ -1772,10 +1776,13 @@ export async function input(kind, a = {}) {
   await sleep(Number(a.settleMs) || 500);
   let changed = null;
   let probe = 'none';
-  if (tick && tick.kind === 'packets') {
-    // 视频流这条路：等包数涨
+  // **不能只认 'packets'。**
+  // frameTick() 现在优先返回 { kind:'frames' }（videoReader 有 frames 字段时），
+  // 只认 'packets' 会永远落进下面的 else 分支 → 两次 frameHash 之间没有 sleep
+  // → 同帧 → changed 恒为 false → **每一次点击都报「画面没变」**（对抗审查发现的新回归）。
+  if (tick && tick.kind !== 'none') {
     changed = await waitChanged(tick, Number(a.settleMs) || 900);
-    probe = 'video-packets';
+    probe = 'frame-' + tick.kind;
     if (!changed) {
       // 包数没动可能是编码器暂时没吐，再用 screencap 确认一次（贵但准）
       const bh = await frameHash();
@@ -1785,8 +1792,10 @@ export async function input(kind, a = {}) {
       }
     }
   } else {
-    // 没有视频流：回退到原来的 screencap 哈希
+    // 没有视频流：回退到 screencap 哈希
+    // **两次之间必须 sleep**，否则截的是同一帧，永远判「没变」。
     const before = await frameHash();
+    await sleep(400);
     const after = await frameHash();
     changed = before && after ? before !== after : null;
     probe = 'screencap';
@@ -1800,9 +1809,9 @@ export async function input(kind, a = {}) {
     // 再给一点时间：有些操作（BACK 退动画）在 500ms 那个点还没变完
     for (let i = 0; i < 3 && changed === false; i += 1) {
       await sleep(400);
-      if (tick && tick.kind === 'packets') {
+      if (tick && tick.kind !== 'none') {
         const cur = frameTick();
-        if (cur.v !== tick.v) changed = true;
+        if (cur.kind === tick.kind && cur.v !== tick.v) changed = true;
       }
     }
   }

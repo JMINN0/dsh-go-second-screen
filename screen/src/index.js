@@ -63,6 +63,10 @@ async function loadDefineTool() {
 export async function apply(ctx) {
   // 启动时修一次假状态（见 stream.js 的 reconcileStreamState）
   import('./stream.js').then(m => m.reconcileStreamState?.()).catch(() => {});
+  // **启动空闲看门狗**：AI 不调工具就自动放掉虚拟屏和推流（省电）。
+  // 实测不关的话 framesrv 持续 10.3% CPU —— 悬浮窗连着 MJPEG，
+  // framesrv 就以为「有人在看」，一直编码。
+  try { T.startIdleWatchdog(); } catch { /* ignore */ }
   // Cordis 规定：没通过 ctx.inject 声明依赖之前，**碰 ctx 的任何属性都会抛**
   // （"cannot get property X without inject"）。所以所有 ctx 访问都放进 inject 回调里。
   // 这个坑让三个插件在真实引擎里全部加载失败过，工具一个都没出现。
@@ -107,7 +111,12 @@ export async function apply(ctx) {
           ];
           for (const [spec, exec] of defs) {
             try {
-              disposers.push(c.tools.register(defineTool({ ...spec(), execute: exec })));
+              // **每次工具调用都刷新空闲计时**，看门狗据此判断「AI 还在干活」。
+              const wrapped = async (a) => {
+                try { T.touchActivity(); } catch { /* ignore */ }
+                return exec(a);
+              };
+              disposers.push(c.tools.register(defineTool({ ...spec(), execute: wrapped })));
             } catch (e) {
               console.error('[dsh-go-plugin-screen] register failed:', e?.message || e);
             }

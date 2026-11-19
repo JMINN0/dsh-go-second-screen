@@ -691,6 +691,86 @@ function levenshtein(a, b) {
   return prev[b.length];
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * **空闲看门狗：AI 不干活就把资源全放掉。**
+ *
+ * ## 为什么必须有
+ *
+ * 实机实测（2026-11-19）：对话结束后虚拟屏+悬浮窗+framesrv 一直在跑，
+ * framesrv 持续 **10.3% CPU**，因为悬浮窗连着 MJPEG 长连接，
+ * framesrv 就认为「有人在看」，一直编码。
+ *
+ * 用户的原话：「dsh 引擎停了 ai 也会停，那还要后台屏一直开着干嘛？」
+ *
+ * 对。屏和推流唯一的用途是「给 AI 操作 + 给用户看」。AI 不调工具了，
+ * 就是没人需要它。留着纯烧电。
+ *
+ * ## 判据
+ *
+ * 每次工具调用都刷新 `lastToolCallAt`。看门狗每分钟检查一次：
+ *   - 超过 IDLE_STOP_MS 没有任何工具调用 → 停推流（关悬浮窗 + framesrv）
+ *   - 再超过 IDLE_DISPLAY_MS → 连虚拟屏一起销毁
+ *
+ * 为什么分两步：停推流是零风险的（屏还在，随时能再开）；
+ * 销毁屏会丢掉屏上的 App 状态，所以多等一会儿。
+ *
+ * ## 不受影响的场景
+ *
+ * 用户主动调 vdisplay_stream / vdisplay_start 时也会刷新时间戳，
+ * 所以「用户想一直看」不会被打断 —— 只要有人调工具就活着。
+ */
+const IDLE_STOP_MS = 3 * 60 * 1000;        // 3 分钟没工具调用 → 停推流
+const IDLE_DISPLAY_MS = 8 * 60 * 1000;     // 8 分钟 → 连屏一起销毁
+let lastToolCallAt = Date.now();
+let idleTimer = null;
+let idleStoppedStream = false;
+let idleStoppedDisplay = false;
+
+/** 每次工具调用时调一下，重置空闲计时。 */
+export function touchActivity() {
+  lastToolCallAt = Date.now();
+  idleStoppedStream = false;
+  idleStoppedDisplay = false;
+}
+
+/** 启动看门狗（插件加载时调一次）。 */
+export function startIdleWatchdog() {
+  if (idleTimer) return;
+  idleTimer = setInterval(async () => {
+    const idle = Date.now() - lastToolCallAt;
+    try {
+      // 第一档：停推流（关悬浮窗 + framesrv）
+      if (idle > IDLE_STOP_MS && !idleStoppedStream) {
+        idleStoppedStream = true;
+        const st = await import('./stream.js');
+        const info = st.info();
+        if (info && info.running) {
+          await import('./tools.js').then((m) => m.streamStop()).catch(() => {});
+          try { console.error('[dsh-screen] 空闲 ' + Math.round(idle / 1000) + 's，已停推流（省电）'); } catch { /* ignore */ }
+        }
+      }
+      // 第二档：销毁屏
+      if (idle > IDLE_DISPLAY_MS && !idleStoppedDisplay) {
+        idleStoppedDisplay = true;
+        const vdMod = await import('./vd.js');
+        const s2 = await vdMod.status();
+        if (s2 && s2.running) {
+          await vdMod.stop({ forceStopApps: false }).catch(() => {});
+          try { console.error('[dsh-screen] 空闲 ' + Math.round(idle / 1000) + 's，已销毁虚拟屏（省电）'); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* 看门狗自己不能崩 */ }
+  }, 60 * 1000);   // 每分钟检查一次
+  // 不阻止进程退出
+  if (idleTimer.unref) idleTimer.unref();
+}
+
+/** 停看门狗（插件卸载时用）。 */
+export function stopIdleWatchdog() {
+  if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
+}
+
 export async function userState() {
   const target = await adbTarget();
   const run = (cmd) => new Promise((resolve) => {

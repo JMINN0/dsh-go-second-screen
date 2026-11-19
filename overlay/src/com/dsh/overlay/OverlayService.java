@@ -161,26 +161,45 @@ public class OverlayService extends Service {
     }
 
     /**
-     * 级联位置：第 idx 个窗口放哪。
+     * 重排所有「自动定位」的窗口，**按每个窗口的实际高度纵向累加**。
      *
-     * 约束：N 个窗口都要在屏内、互不重叠。
-     * 做法：阶梯 +60dp，到屏幕右边 78% 就换列并回顶。
-     * 换列后如果还不够高，缩小步长（避免第 5 个窗口跑出屏幕）。
+     * ## 为什么不能用固定阶梯
+     *
+     * 固定步长 64dp 在窗口高度不同时会重叠：
+     * 横屏窗口高约 341px、竖屏高达 1478px，同样的步长既浪费空间又压在一起。
+     * 用户拖动过的窗口标记 auto=false，**不动它**（只避开）。
+     *
+     * 算法：从上往下累加，一个字放不下就换列。
      */
-    private int[] cascadePos(int idx, int screenW, int screenH) {
-        int stepX = dp(56);
-        int stepY = dp(64);
+    private void relayoutAuto() {
+        int screenW = getResources().getDisplayMetrics().widthPixels;
+        int screenH = getResources().getDisplayMetrics().heightPixels;
         int startX = dp(12);
         int startY = dp(120);
-        int cols = Math.max(1, (screenW - startX) / Math.max(1, stepX) - 2);
-        int col = idx / Math.max(1, cols);
-        int row = idx % Math.max(1, cols);
-        int x = startX + col * stepX;
-        int y = startY + row * stepY;
-        // 兜底：别跑出屏幕
-        if (x > screenW - dp(80)) x = startX;
-        if (y > screenH - dp(120)) y = startY;
-        return new int[]{x, y};
+        int gap = dp(10);
+        int colW = 0;          // 当前列已用宽度（该列最宽的窗口）
+        int x = startX, y = startY;
+
+        for (Win w : wins.values()) {
+            if (!w.autoPos || w.root == null || w.lp == null) continue;
+            int ww = w.curW > 0 ? w.curW : Math.round(screenW * 0.46f);
+            int wh = w.curH > 0 ? w.curH : dp(200);
+
+            // 当前列放不下了 → 换列
+            if (y + wh > screenH - dp(40) && y > startY) {
+                x = x + colW + gap;
+                y = startY;
+                colW = 0;
+            }
+            // 换列后还是放不下（窗口比屏还高）→ 从顶部强行放
+            if (y + wh > screenH - dp(40)) y = startY;
+
+            w.lp.x = x;
+            w.lp.y = y;
+            try { wm.updateViewLayout(w.root, w.lp); } catch (Throwable t) { /* ignore */ }
+            y += wh + gap;
+            if (ww > colW) colW = ww;
+        }
     }
 
     @Override
@@ -206,11 +225,14 @@ public class OverlayService extends Service {
 
         float aspect = 0.5f;
         float appliedAspect = -1f;
+        boolean autoPos = true;   // 用户拖过就设 false，重排时不动它
+        int curW = 0, curH = 0;   // 当前实际尺寸（relayoutAuto 要用）
         boolean collapsed = false;
         int userW = 0, userH = 0;
         long lastOk = 0;
         int portRetries = 0;
-        Bitmap reuseBmp = null;
+        long lastFrameAt = 0;        // 上一帧显示时间（限帧用）
+        int dropped = 0;             // 被限帧丢掉的帧数（诊断）
 
         Win(int port) { this.port = port; }
 
@@ -309,14 +331,9 @@ public class OverlayService extends Service {
                     android.graphics.PixelFormat.TRANSLUCENT);
             lp.gravity = Gravity.TOP | Gravity.START;
 
-            // **级联位置**：按这个窗口在 wins 里的序号错开，互不重叠
-            int idx = 0;
-            for (Integer q : wins.keySet()) { if (q.equals(port)) break; idx++; }
-            int[] pos = cascadePos(idx,
-                    getResources().getDisplayMetrics().widthPixels,
-                    getResources().getDisplayMetrics().heightPixels);
-            lp.x = pos[0];
-            lp.y = pos[1];
+            // 先给个临时位置，等第一帧拿到尺寸后 relayoutAuto() 会重排
+            lp.x = dp(12);
+            lp.y = dp(120) + wins.size() * dp(60);
 
             root.setOnTouchListener(new View.OnTouchListener() {
                 float downX, downY;
@@ -335,6 +352,7 @@ public class OverlayService extends Service {
                             int dy = (int)(e.getRawY() - downY);
                             if (Math.abs(dx) > dp(6) || Math.abs(dy) > dp(6)) moved = true;
                             if (moved) {
+                                autoPos = false;   // **用户拖过 → 以后重排不动它**（否则下次加窗会跳回去）
                                 lp.x = startX + dx; lp.y = startY + dy;
                                 try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
                             }
@@ -393,6 +411,11 @@ public class OverlayService extends Service {
 
             img.setLayoutParams(new LinearLayout.LayoutParams(w, h));
             img.requestLayout();
+            // 记下实际尺寸，并重排所有自动窗口（第一次拿到比例时位置才准）
+            boolean sizeChanged = (curW != w + dp(6) || curH != h + dp(50));
+            curW = w + dp(6);        // 加上内边距和边框
+            curH = h + dp(50);       // 加上工具条 + 标签 + 手柄
+            if (sizeChanged) ui.post(new Runnable() { public void run() { relayoutAuto(); } });
         }
 
         /** 起轮询线程（幂等）。 */
@@ -446,26 +469,43 @@ public class OverlayService extends Service {
 
         long lastStatusAt = 0;
 
-        /** 从 multipart 流里读一帧 JPEG。 */
+        /**
+         * 从 multipart 流里读一帧 JPEG。
+         *
+         * **第一版有 bug**：每遇到 '\n' 就 reset 缓冲区，结果只留下最后一行，
+         * Content-Length 那行被清掉 → len<=0 → 返回 null → 窗口永远不显示。
+         * 正确做法：把整个头部块（直到空行）累积起来再解析。
+         */
         byte[] readOnePart(InputStream in) throws Exception {
-            // 找分隔行
-            ByteArrayOutputStream line = new ByteArrayOutputStream();
-            int prev = -1, cur;
-            while ((cur = in.read()) != -1) {
-                if (prev == '\n' && cur == '\n') break;          // 空行 = 头结束
-                if (cur == '\n') { line.reset(); prev = cur; continue; }
-                if (cur != '\r') line.write(cur);
-                prev = cur;
+            // ① 一次读一个字节累积整块头部，直到遇到空行（\r\n\r\n）
+            ByteArrayOutputStream hb = new ByteArrayOutputStream();
+            int b;
+            int nl = 0;   // 连续换行计数
+            while ((b = in.read()) != -1) {
+                hb.write(b);
+                if (b == '\n') {
+                    nl++;
+                    if (nl == 2) break;      // 空行 = 头部结束
+                } else if (b != '\r') {
+                    nl = 0;
+                }
+                if (hb.size() > 8192) break;  // 头部异常，放弃这一帧
             }
+            String hdr = new String(hb.toByteArray(), "UTF-8");
             int len = -1;
-            String hdr = new String(line.toByteArray(), "UTF-8");
             int ci = hdr.toLowerCase().indexOf("content-length:");
             if (ci >= 0) {
-                try {
-                    len = Integer.parseInt(hdr.substring(ci + 15).trim().split("[^0-9]")[0]);
-                } catch (Throwable t) { /* ignore */ }
+                int e = ci + 15;
+                while (e < hdr.length() && !Character.isDigit(hdr.charAt(e))) e++;
+                int st = e;
+                while (e < hdr.length() && Character.isDigit(hdr.charAt(e))) e++;
+                if (e > st) {
+                    try { len = Integer.parseInt(hdr.substring(st, e)); } catch (Throwable t) { /* ignore */ }
+                }
             }
             if (len <= 0 || len > 8_000_000) return null;
+
+            // ② 精确读 len 字节
             byte[] buf = new byte[len];
             int off = 0;
             while (off < len) {
@@ -476,9 +516,25 @@ public class OverlayService extends Service {
             return buf;
         }
 
-        /** 解码并显示一帧。 */
+        /**
+         * 解码并显示一帧。
+         *
+         * **限帧是必须的。** MJPEG 是全速推的（服务端有新帧就发），
+         * 单窗口无所谓，但 N 个窗口时解码量 = N × 推送帧率：
+         * 5 个窗口 × 50fps = 250 次解码/秒，主线程必然堆积、GC 抖动。
+         *
+         * 上限按窗口数动态算：1 个窗口 30fps，2-3 个 15fps，4+ 个 8fps。
+         * 超出的帧直接丢（**丢掉比排队好** —— 排队只会越来越延迟）。
+         */
         void showJpeg(byte[] jpg) {
+            long now = System.currentTimeMillis();
+            int n = Math.max(1, wins.size());
+            int capFps = n <= 1 ? 30 : (n <= 3 ? 15 : 8);
+            if (now - lastFrameAt < (1000 / capFps)) { dropped++; return; }
+            lastFrameAt = now;
             try {
+                // 收起/不可见时不解码 —— 反正用户看不到
+                if (collapsed || root == null || root.getVisibility() != View.VISIBLE) return;
                 Bitmap bm = BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
                 if (bm == null) return;
                 final Bitmap fb = bm;
@@ -522,7 +578,7 @@ public class OverlayService extends Service {
             }
             img = null;
             label = null;
-            if (reuseBmp != null) { try { reuseBmp.recycle(); } catch (Throwable t) { } reuseBmp = null; }
+            // 位图交给 GC（限帧后不再复用同一个 buffer，避免撕裂）
             Log.i(TAG, "窗口已关闭 port=" + port);
         }
     }

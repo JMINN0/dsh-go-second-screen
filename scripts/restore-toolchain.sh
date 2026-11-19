@@ -16,7 +16,10 @@ apt-get install -y -qq \
   python3-pil 2>&1 | tail -3
 
 echo "=== 2/4 pip 包 ==="
-pip install -q pillow numpy zstandard -i https://pypi.tuna.tsinghua.edu.cn/simple 2>&1 | tail -2
+# **opencv 必须装**：模板匹配、颜色检测、Hough、dHash 全依赖它。
+# 之前漏了 —— 环境重置后会静默丢失，视觉方法全部失效。
+pip install -q pillow numpy zstandard opencv-python-headless \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple 2>&1 | tail -2
 
 echo "=== 3/4 Android SDK jar（若已被删，从备份恢复）==="
 SDK="$(dirname "$0")/../tools/sdk"

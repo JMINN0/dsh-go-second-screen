@@ -12,6 +12,7 @@ tesseract-ocr
 zipalign
 
 ## pip 包（视觉/语音相关）
+opencv-python-headless  # 模板匹配/颜色检测/Hough 全靠它
 numpy==2.5.4
 onnxruntime==1.31.1
 pillow==13.0.0

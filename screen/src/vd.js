@@ -913,8 +913,9 @@ function forget(reason) {
   for (const sk of state.sockets || []) { try { sk?.destroy(); } catch { /* ignore */ } }
   state.child = null; state.sockets = [];
   state.displayId = null; state.sfId = null; state.scid = null; state.port = null;
-  state.lastShotHash = null; state.lastShotPath = null; state.lastShotImgWidth = 0;
-  state.lastShotRegion = null;   // 尺寸/位置基准作废，否则 input 会按旧 region 换算
+  // **8 个字段一次清全**（原来只清 4 个：ImgHeight/W/H/cacheKey 会漏，和 stop() 不一致）
+  resetShotBasis();
+  state.lastInputAt = null;      // pickRoi 的兜底 ROI 用它，不清会拿上一块屏的坐标当中心
   lastReuseResult = null;        // **复用检查缓存也作废**，否则新建屏后还在用旧的判定
   lastReuseCheckAt = 0;
   clearPersistedState();         // **盘上的记录也清掉**，否则下个进程会去复用死屏
@@ -1643,6 +1644,26 @@ export async function input(kind, a = {}) {
   const toY = () => mapY('ny', 'y') ?? 0;
 
 
+  /*
+   * **基准必须在这里采，不能在后面。**
+   *
+   * 走 scrcpy 控制通道时，事件在「构造命令」阶段就发出去了（下面 tap 分支里
+   * sent === bufs.length 就把 cmd 置 null），而原代码把 tick 采样放在 1829 行
+   * —— **先注入、后采基准**。
+   *
+   * 后果：对「只重绘一帧就静止」的控件（复选框、开关、单帧跳转），
+   * 基准里已经包含了这次变化 → waitChanged 永远看不到增量 → changed=false
+   * → 3 次补轮询也看不到 → ok:false +「这一下可能真的没生效」
+   * → 调用方重试 → **重复点击**（购买/发送类操作会出事）。
+   *
+   * 独立复核指出这是三个最危险的问题之一，修法就是把采样点提前。
+   */
+  // **verify 必须在这里就声明**：它原来在 1836 行（分派之后），
+  // 而 tick 采样要在分派之前，直接用会踩 const 的暂时性死区
+  // （ReferenceError: Cannot access 'verify' before initialization，实测踩到）。
+  const verify = a.verify !== false;
+  const tick = verify ? frameTick() : null;
+
   if (kind === 'tap') {
     // **优先走 scrcpy 控制通道**：能给真实压力、能插 MOVE、延迟也低。
     // 只有控制通道不可用（老 server / socket 断了）才退回 adb input。
@@ -1816,7 +1837,7 @@ export async function input(kind, a = {}) {
     y: a.ny != null ? Number(a.ny) * state.height : (Number(a.y) || 0),
   };
 
-  const verify = a.verify !== false;
+  // verify 已在前面声明（tick 采样需要它）
   /*
    * **优先用视频流包数做校验，不用 screencap 哈希。**
    *
@@ -1826,7 +1847,7 @@ export async function input(kind, a = {}) {
    *
    * 包数探测是 0ms、免费、而且 25fps 粒度比 screencap 的 143ms 灵敏。
    */
-  const tick = verify ? frameTick() : null;
+  // tick 已经在分派之前采好了（见上面的注释）
   // SET_CLIPBOARD 那条路 cmd 是 null（server 已经自己粘过，不能再发 keyevent）
   const out = cmd ? await shell(cmd) : '（SET_CLIPBOARD 已连带粘贴）';
   if (!verify) return { ok: true, displayId: d, out: out.trim(), changed: null };

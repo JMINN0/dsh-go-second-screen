@@ -115,8 +115,14 @@ def op_match(req):
     tpl = _load(req['template'])
     H, W = img.shape[:2]
     th, tw = tpl.shape[:2]
-    if th > H or tw > W:
-        return {'ok': False, 'hint': '模板比搜索区域大'}
+    # **这个检查不能放在尺度循环之前。**
+    # region 比模板小时（例：region 300×300、模板 540×540），
+    # 0.55 那一档是放得下的，但前置检查会直接返回失败 —— 多尺度在 region 场景下失效。
+    # 改成：按「最小尺度缩小后」判断。
+    _minScale = min([float(x) for x in (req.get('scales') or [1.0]) if float(x) > 0] or [1.0])
+    if th * _minScale > H or tw * _minScale > W:
+        return {'ok': False,
+                'hint': '模板比搜索区域大（缩小到最小尺度 %.2f 也放不下）' % _minScale}
     thr = float(req.get('threshold', 0.75))
 
     # **纯色/低方差模板不能用 TM_CCOEFF_NORMED。**

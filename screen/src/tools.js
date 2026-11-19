@@ -285,6 +285,14 @@ export async function stop(args) {
   const lines = ['虚拟屏已销毁。'];
   if (r.killed?.length) lines.push(`已清理后台 App：${r.killed.join('、')}`);
   if (r.hint) lines.push(r.hint);
+  // **停屏时也把常驻助手关掉。**
+  // 原来是「用一次 find_image / vdisplay_text 之后，OpenCV(80-150MB) 和
+  // OCR(15MB 模型) 会一直挂到插件卸载」—— 实测确实如此（独立复核指出）。
+  // closeAll 里虽然写了 shutdown，但 closeAll 全库没有调用点（死代码）。
+  // 这里直接关，让「停屏」真正释放全部资源。
+  try { const vis = await import('./vision.js'); vis.shutdown(); } catch { /* ignore */ }
+  try { const oc = await import('./ocr.js'); oc.shutdown(); } catch { /* ignore */ }
+
   return { text: lines.join('\n') };
 }
 
@@ -659,8 +667,17 @@ export async function tapText(args) {
   // 原来这里额外调一次 vd.shot(160 宽)，250-400ms；加上后面的固定 1.2 秒，
   // tap_text 真实墙钟 4.2-6.2 秒（OCR 专项审查指出）。
   const V = await import('./vision.js');
-  // **复用 findText 刚截的那张**，不再多截一次（省 376ms）。
-  const before = r.shotHash || null;
+  // **必须用同一种哈希。**
+  // findText 返回的 shotHash 是 shot() 算的 SHA1（40 位，整张 PNG 字节），
+  // 而下面 after 用的是 vision 的 dHash（16 位，9×8 灰度）—— 两种字符串永远不等，
+  // 于是 pageChanged 恒 true，**校验退化成返回常量 true**。
+  // 这是「防假成功的代码自己在造假成功」（独立复核发现，最讽刺也最危险的一条）。
+  // 正确做法：用同一张图的路径重新算 dHash 当基线。
+  let before = null;
+  if (r.shotPath) {
+    const fp0 = await V.dhash(r.shotPath);
+    before = fp0.ok ? fp0.hash : null;
+  }
 
   const t = await input({
     kind: 'tap', nx: r.nx, ny: r.ny,
@@ -953,7 +970,10 @@ export async function tapImage(args) {
   const before = g1.ok ? (await V.dhash(g1.path)).hash : null;
 
   const t = await input({ kind: 'tap', nx: r.nx, ny: r.ny, verify: false });
-  const injected = t.ok !== false;
+  // **tools.input() 从不返回 ok 字段** —— 它所有返回路径都只有 {text}。
+  // 所以 `t.ok !== false` 恒为 true（undefined !== false），注入失败也报 ✅。
+  // 改成和 tapText 一致的文本判据。
+  const injected = !/失败|不允许|不可用/.test(String(t.text || ''));
   await new Promise((res) => setTimeout(res, 900));
 
   const g2 = await grabFullPng();
@@ -1156,7 +1176,7 @@ export async function tapColor(args) {
   const before = g1.ok ? (await V.dhash(g1.path)).hash : null;
 
   const t = await input({ kind: 'tap', nx: b.cx, ny: b.cy, verify: false });
-  const injected = t.ok !== false;
+  const injected = !/失败|不允许|不可用/.test(String(t.text || ''));
   await new Promise((res) => setTimeout(res, 900));
 
   const g2 = await grabFullPng();

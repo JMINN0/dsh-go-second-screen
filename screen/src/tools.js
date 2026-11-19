@@ -21,6 +21,14 @@ export async function modes() {
 }
 
 export async function start(args) {
+  // **AI 可以按任务预估设定空闲超时**：比如「这个任务大概要挂 30 分钟」就传 keepMin:30。
+  // 不传就沿用当前设定（默认 5 分钟）。
+  if (args?.keepMin != null) {
+    const r = setIdleTimeout(args.keepMin);
+    if (r.ok) {
+      try { console.error('[dsh-screen] 后台屏空闲超时设为 ' + r.minutes + ' 分钟'); } catch { /* ignore */ }
+    }
+  }
   const r = await vd.start({
     width: Number(args?.width) || 0,       // 0 = 自动按物理屏比例
     height: Number(args?.height) || 0,
@@ -720,8 +728,16 @@ function levenshtein(a, b) {
  * 用户主动调 vdisplay_stream / vdisplay_start 时也会刷新时间戳，
  * 所以「用户想一直看」不会被打断 —— 只要有人调工具就活着。
  */
-const IDLE_STOP_MS = 3 * 60 * 1000;        // 3 分钟没工具调用 → 停推流
-const IDLE_DISPLAY_MS = 8 * 60 * 1000;     // 8 分钟 → 连屏一起销毁
+// **超时时间由 AI 按任务预估设定**（1~360 分钟）。
+// 用户的原话：「让 ai 自己判断这个任务需要使用多久后台屏，在 ai 不操作的情况下才开始计时，
+// 一旦操作立刻重置计时」。
+//
+// 默认 5 分钟：绝大多数交互式任务每几分钟就会有工具调用，不会误关；
+// 长任务（挂机/等待/轮询）由 AI 自己调大。
+const IDLE_MIN_DEFAULT = 5;
+const IDLE_MIN_FLOOR = 1;      // 最少 1 分钟
+const IDLE_MIN_CEIL = 360;     // 最多 6 小时
+let idleTimeoutMin = IDLE_MIN_DEFAULT;
 let lastToolCallAt = Date.now();
 let idleTimer = null;
 let idleStoppedStream = false;
@@ -739,36 +755,84 @@ export function startIdleWatchdog() {
   if (idleTimer) return;
   idleTimer = setInterval(async () => {
     const idle = Date.now() - lastToolCallAt;
+    const limitMs = idleTimeoutMin * 60 * 1000;
+    if (idle <= limitMs) return;
     try {
-      // 第一档：停推流（关悬浮窗 + framesrv）
-      if (idle > IDLE_STOP_MS && !idleStoppedStream) {
+      // **到点：推流和屏一起关。**
+      // 先关推流（关悬浮窗 + framesrv，立刻省掉编码的 CPU），
+      // 再销毁屏（释放 ImageReader/镜像屏/端口）。
+      if (!idleStoppedStream) {
         idleStoppedStream = true;
-        const st = await import('./stream.js');
-        const info = st.info();
-        if (info && info.running) {
-          await import('./tools.js').then((m) => m.streamStop()).catch(() => {});
-          try { console.error('[dsh-screen] 空闲 ' + Math.round(idle / 1000) + 's，已停推流（省电）'); } catch { /* ignore */ }
-        }
+        await import('./tools.js').then((m) => m.streamStop()).catch(() => {});
       }
-      // 第二档：销毁屏
-      if (idle > IDLE_DISPLAY_MS && !idleStoppedDisplay) {
+      if (!idleStoppedDisplay) {
         idleStoppedDisplay = true;
         const vdMod = await import('./vd.js');
-        const s2 = await vdMod.status();
-        if (s2 && s2.running) {
+        const st2 = await vdMod.status();
+        if (st2 && st2.running) {
           await vdMod.stop({ forceStopApps: false }).catch(() => {});
-          try { console.error('[dsh-screen] 空闲 ' + Math.round(idle / 1000) + 's，已销毁虚拟屏（省电）'); } catch { /* ignore */ }
         }
       }
+      try {
+        console.error('[dsh-screen] 空闲 ' + Math.round(idle / 60000) + ' 分钟（上限 ' + idleTimeoutMin + '），已自动关闭后台屏');
+      } catch { /* ignore */ }
     } catch { /* 看门狗自己不能崩 */ }
   }, 60 * 1000);   // 每分钟检查一次
   // 不阻止进程退出
   if (idleTimer.unref) idleTimer.unref();
 }
 
+/**
+ * 设定「AI 停止操作多久后自动关掉后台屏」。
+ *
+ * @param {number} minutes 1~360 分钟
+ * @returns {{ok:boolean, minutes:number, hint?:string}}
+ */
+export function setIdleTimeout(minutes) {
+  const n = Number(minutes);
+  if (!Number.isFinite(n)) return { ok: false, minutes: idleTimeoutMin, hint: '要给分钟数，比如 30' };
+  const clamped = Math.min(IDLE_MIN_CEIL, Math.max(IDLE_MIN_FLOOR, Math.round(n)));
+  idleTimeoutMin = clamped;
+  // 设置完立刻刷新计时，避免「刚设完就被判定空闲」
+  lastToolCallAt = Date.now();
+  idleStoppedStream = false;
+  idleStoppedDisplay = false;
+  return { ok: true, minutes: clamped };
+}
+
+/** 当前设定（给诊断用）。 */
+export function getIdleTimeout() { return idleTimeoutMin; }
+
 /** 停看门狗（插件卸载时用）。 */
 export function stopIdleWatchdog() {
   if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
+}
+
+
+/**
+ * 调整「AI 停止操作多久后自动关掉后台屏」。
+ *
+ * 长任务（挂机、等转盘、轮询消息）需要屏活久一点；
+ * 短任务（点几下就完）可以设短，省电更彻底。
+ *
+ * 任何工具调用都会重置计时，所以只要 AI 一直在操作，屏就不会被关。
+ */
+export function keepAlive(args) {
+  const min = args?.minutes;
+  const r = setIdleTimeout(min);
+  if (!r.ok) {
+    return { text: `设置失败：${r.hint}。当前是 ${getIdleTimeout()} 分钟。` };
+  }
+  const lines = [
+    `✅ 后台屏空闲超时设为 **${r.minutes} 分钟**`,
+    '',
+    '含义：AI 连续 ' + r.minutes + ' 分钟没有调用任何工具 → 自动关闭推流 + 销毁虚拟屏。',
+    '任何工具调用都会重置计时，所以只要还在操作就不会被关。',
+    '',
+    `范围：1~360 分钟。当前设定：${getIdleTimeout()} 分钟。`,
+  ];
+  if (r.minutes === 360) lines.push('', '⚠️ 已设为上限 6 小时 —— 期间会持续占 CPU，确认真的需要这么久。');
+  return { text: lines.join('\n'), minutes: r.minutes };
 }
 
 export async function userState() {

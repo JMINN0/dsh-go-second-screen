@@ -33,6 +33,7 @@ export function startSpec() {
       '屏与插件进程同生共死：客户端断开或引擎重启，屏自动消失，不会留垃圾。',
     ].join('\n'),
     parameters: {
+      keepMin: { type: 'integer', description: '**按任务预估后台屏要活多久**（分钟，1~360）。不传沿用当前设定（默认 5）。长任务（挂机/轮询/等转盘）先设大，比如 60；点几下就完的设 3。AI 连续这么多分钟没调工具就自动关闭。' },
       maxFps: {
         type: 'integer',
         description: '视频流帧率上限，默认 60。传 0 表示不限。'
@@ -627,5 +628,30 @@ export function tapTextSpec() {
       verify: { type: 'boolean', description: '点击后校验画面有没有变化，默认 true' },
     },
     output: out('点到了什么、坐标、校验结果。'),
+  };
+}
+
+/** 调整后台屏的空闲超时 —— 让 AI 按任务预估生命周期。 */
+export function keepAliveSpec() {
+  return {
+    name: 'screen_keepalive',
+    description: [
+      '设定「AI 停止操作多久后自动关掉后台屏」，让 AI 按任务预估生命周期。',
+      '',
+      '**开始长任务前先调它**：挂机、等转盘、轮询消息、玩需要时间累积的游戏 → 设大（30-360 分钟）；',
+      '点几下就完的短任务 → 设小（2-5 分钟），省电更彻底。',
+      '',
+      '判据是「AI 连续 N 分钟没有调用任何工具」。**任何工具调用都会重置计时**，',
+      '所以只要还在操作就不会被关；真闲着时才关。',
+      '',
+      '默认 5 分钟。范围 1~360 分钟。',
+      '',
+      '为什么需要它：实测后台屏不关时 framesrv 持续 10.3% CPU。',
+      '设太短会在思考时被关掉，设太长会白白耗电 —— 按任务估是唯一正确的做法。',
+    ].join('\n'),
+    parameters: {
+      minutes: { type: 'integer', required: true, description: '空闲多少分钟后自动关闭，1~360。短任务 2-5，长任务 30-360。' },
+    },
+    output: out('新的超时设定和含义。'),
   };
 }

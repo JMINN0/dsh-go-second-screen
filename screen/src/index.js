@@ -16,7 +16,7 @@ import {
   // 感知层（2026-11-16）：常驻解码、实时帧、等稳定、自动 ROI、黑屏探针
   liveSpec, liveShotSpec, waitStableSpec, roiSpec, probeSecureSpec,
   // 按文字找/点（2026-11-19）：消掉模型自己算坐标的 17.6% 点空率
-  findTextSpec, tapTextSpec,
+  findTextSpec, tapTextSpec, keepAliveSpec,
 } from './tool-spec.js';
 import * as T from './tools.js';
 
@@ -108,6 +108,8 @@ export async function apply(ctx) {
               // 按文字找/点（2026-11-19）：消掉模型自己算坐标的 17.6% 点空率
               [findTextSpec, (a) => T.findText(a)],
               [tapTextSpec, (a) => T.tapText(a)],
+              // 后台屏生命周期（2026-11-19）：让 AI 按任务预估空闲超时
+              [keepAliveSpec, (a) => T.keepAlive(a)],
           ];
           for (const [spec, exec] of defs) {
             try {

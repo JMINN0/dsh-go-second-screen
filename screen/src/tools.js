@@ -273,8 +273,12 @@ export async function status() {
 }
 
 export async function stop(args) {
-  // 先停推流和悬浮窗：否则胶囊会永远显示"AI 正在操作"+ 冻在最后一帧（复核实测）。
-  await overlayStop().catch(() => {});
+  // **只关这一块屏的窗口，不要全关。**
+  // 原来这里是不带参数的 overlayStop() = 全关 —— 用户有 2 块屏时销毁其中一块，
+  // 两块的悬浮窗都会被关掉（对抗审查 S「Node 侧必须同步改」）。
+  const stopDisp = vd.getActive()?.displayId;
+  const stopPort = stopDisp != null ? (screenPorts.get(Number(stopDisp)) || 0) : 0;
+  await overlayStop(stopPort || undefined).catch(() => {});
   // **屏关了就停 framesrv** —— 用户的要求：「关闭就跟着自动关闭推流屏」
   try {
     const fsrv = await import('./framesrv.js');
@@ -383,22 +387,44 @@ async function overlayStart(port) {
   }
 }
 
-async function overlayStop() {
+/**
+ * 关悬浮窗。
+ *
+ * @param {number} [port] 只关这个端口的窗口；省略 = 全关。
+ *
+ * **多窗口后必须支持单关**：一块屏停止推流时，不该把别的屏的窗口也关了。
+ */
+async function overlayStop(port) {
   try {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
     const run = promisify(execFile);
     const target = await adbTarget();
+    const arg = (typeof port === 'number' && port > 0)
+      ? `--ei closePort ${port}`
+      : '--ez stop true';
     await run('adb', ['-s', target, 'shell',
-      `am start -n ${OVERLAY_PKG}/.MainActivity --ez stop true`], { timeout: 8000 });
+      `am start -n ${OVERLAY_PKG}/.MainActivity ${arg}`], { timeout: 8000 });
     return { ok: true };
   } catch { return { ok: false }; }
 }
 
 /** 开始把虚拟屏画面推给原生胶囊插件（装了悬浮窗 APK 的话一起拉起来）。 */
+/** displayId → framesrv 端口。多屏时用于按屏关推流/画标记。 */
+const screenPorts = new Map();
+
 export async function streamStart(args) {
-  const s = await vd.start();
-  if (!s.ok) return { text: `建屏失败：${s.hint}` };
+  // **支持为指定的屏开推流（屏幕池用）。**
+  // 屏幕池里的屏不是 vd 的活动屏，不能走 vd.start()（那会去建/复用另一块）。
+  // 传了 displayId 就直接用它，跳过 vd.start()。
+  let s;
+  if (args?.displayId) {
+    s = { ok: true, displayId: Number(args.displayId), sfId: args?.sfId || null,
+          width: args?.width, height: args?.height };
+  } else {
+    s = await vd.start();
+    if (!s.ok) return { text: `建屏失败：${s.hint}` };
+  }
   const fps = Math.min(Math.max(Number(args?.fps) || 2, 1), 15);   // 上限 15（原来 4 是桥接遗留）
   const width = Math.min(Math.max(Number(args?.width) || 360, 240), 720);
   // 传真实的 focusedApp：以前这里写死空串，导致胶囊永远只显示"操作中 12s"。
@@ -430,18 +456,33 @@ export async function streamStart(args) {
     // 胶囊读 stream.json 的 port 去取 /frame.jpg 和 /status，
     // framesrv 的这两个端点返回的字段是兼容的（running/frames/fps/aspect）。
     try {
-      const { writeFile, mkdir } = await import('node:fs/promises');
+      const { writeFile, readFile, mkdir } = await import('node:fs/promises');
       const { homedir } = await import('node:os');
       const { join } = await import('node:path');
       const dir = join(homedir(), '.dsh', 'plugin-screen');
       await mkdir(dir, { recursive: true });
+      // **多屏：扁平字段保留「活动那块」（胶囊兼容），另加 screens 列表。**
+      let prevScreens = [];
+      try {
+        const oldRaw = await readFile(join(dir, 'stream.json'), 'utf8');
+        const oldJ = JSON.parse(oldRaw);
+        if (Array.isArray(oldJ.screens)) prevScreens = oldJ.screens;
+      } catch { /* 第一次写 */ }
+      const me = {
+        displayId: Number(s.displayId), port: fast.port,
+        aspect: s.width && s.height ? (s.width / s.height) : 0,
+        size: (s.width || 0) + 'x' + (s.height || 0),
+      };
+      const screens = prevScreens.filter((x) => Number(x.displayId) !== me.displayId);
+      screens.push(me);
       await writeFile(join(dir, 'stream.json'), JSON.stringify({
         port: fast.port, running: true, startedAt: Date.now(),
         fps, width, displayId: String(s.displayId),
         focusedApp: focus || '',
         state: 'looking',
-        aspect: s.width && s.height ? (s.width / s.height) : 0,
+        aspect: me.aspect,
         backend: 'imagereader',
+        screens,
       }));
     } catch { /* 写不进去不影响推流 */ }
   }
@@ -463,7 +504,20 @@ export async function streamStart(args) {
   return { text: lines.join('\n') };
 }
 
-export async function streamStop() {
+/**
+ * 停推流。
+ * @param {{displayId?:number}} [args] 只停这一块屏；省略 = 全停。
+ */
+export async function streamStop(args) {
+  const oneId = args?.displayId != null ? Number(args.displayId) : null;
+  if (oneId != null) {
+    // **只停这一块**：关它的悬浮窗 + 停它的 framesrv，别的不动
+    const p = screenPorts.get(oneId) || 0;
+    if (p) await overlayStop(p);
+    try { const fsrv = await import('./framesrv.js'); await fsrv.stop(oneId); } catch { /* ignore */ }
+    screenPorts.delete(oneId);
+    return { text: `已停掉 displayId=${oneId} 的推流` + (p ? `（端口 ${p}）` : '') };
+  }
   await overlayStop();       // 先关悬浮窗，否则它会自己发现推流没了才关（多留一会儿）
   // **真的把 framesrv 停掉。**
   // 审计发现：原来全库没有任何 framesrv.stop() 调用点 ——
@@ -1541,11 +1595,30 @@ export async function newScreen(args) {
     hwc: args?.hwc,
   });
   if (!r.ok) return { text: `建屏失败：${r.hint}` };
-  return {
-    text: `新屏已建好：${r.screenId}（displayId=${r.displayId}，dpi=${r.dpi}）\n`
-      + `它现在是活动屏，接下来 vdisplay_launch 会投到它上面。\n`
-      + `想切回别的屏用 screen_use。`,
-  };
+
+  const lines = [
+    `新屏已建好：${r.screenId}（displayId=${r.displayId}，dpi=${r.dpi}）`,
+    `它现在是活动屏，接下来 vdisplay_launch 会投到它上面。`,
+  ];
+
+  // **屏幕池的屏也要有自己的推流和悬浮窗。**
+  // 用户的要求：「开多少个就带多少个悬浮窗起来」。
+  // 原来 newScreen 完全不启动推流 → 池里的屏用户看不见（只有 vdisplay_start 才有窗口）。
+  // overlay:false 可以显式关掉（用户说「喊 ai 不启动悬浮窗」）。
+  if (args?.overlay !== false) {
+    try {
+      const r2 = await streamStart({ displayId: r.displayId, sfId: r.sfId, overlay: true });
+      const t = String(r2?.text || '');
+      if (/悬浮窗已浮起/.test(t)) lines.push('✅ 这块屏的悬浮窗已浮起（多屏会按级联位置错开）');
+      else lines.push('⚠️ 推流：' + t.split('\n').slice(0, 2).join(' '));
+    } catch (e) {
+      lines.push('⚠️ 自动推流失败：' + String(e?.message || e).slice(0, 60));
+    }
+  } else {
+    lines.push('（按你的要求没有起悬浮窗；要看画面用 vdisplay_stream）');
+  }
+  lines.push(`想切回别的屏用 screen_use。`);
+  return { text: lines.join('\n') };
 }
 
 export async function useScreen(args) {

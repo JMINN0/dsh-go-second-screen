@@ -40,6 +40,7 @@ public class MainActivity extends Activity {
         }
 
         int port = it != null ? it.getIntExtra("port", 0) : 0;
+        int closePort = it != null ? it.getIntExtra("closePort", 0) : 0;
         String state = it != null ? it.getStringExtra("state") : null;
 
         // ① 要悬浮窗权限
@@ -60,6 +61,7 @@ public class MainActivity extends Activity {
         // ② 起服务
         Intent sv = new Intent(this, OverlayService.class);
         if (port > 0) sv.putExtra("port", port);
+        if (closePort > 0) sv.putExtra("closePort", closePort);
         if (state != null) sv.putExtra("state", state);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(sv);
         else startService(sv);

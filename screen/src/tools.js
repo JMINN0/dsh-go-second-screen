@@ -115,7 +115,13 @@ export async function input(args) {
     }
   } catch { /* 没坐标就算了（滑动这类） */ }
   const kind = String(args?.kind || '').trim();
-  if (!['tap', 'swipe', 'text', 'key', 'paste'].includes(kind)) return { text: 'kind 只能是 tap / swipe / text / key / paste。' };
+  // **hold 必须在这个白名单里。**
+  // vd.js:1568 早就实现了 kind==='hold'（60Hz 连续 MOVE，驱动游戏摇杆），
+  // 但这里漏了它 → 模型传 hold 直接被拒，README 宣传的「60Hz 摇杆走路」
+  // 只有命令行能用，模型完全够不着（对抗审查发现的）。
+  if (!['tap', 'swipe', 'hold', 'text', 'key', 'paste'].includes(kind)) {
+    return { text: 'kind 只能是 tap / swipe / hold / text / key / paste。hold 是按住不动（游戏摇杆/长按/挖方块）。' };
+  }
   const r = await vd.input(kind, args || {});
 
   // shotAfter：动作后顺手截一张，省掉「再调一次 vdisplay_shot」的整轮模型往返。
@@ -506,6 +512,116 @@ export async function text(args) {
   lines.push('要读的位置画面对不上？用 vdisplay_shot(frames=1) 看实际画面。');
   lines.push('要看清某个按钮长什么样？用 vdisplay_shot 配合坐标自己判断。');
   return { text: lines.join('\n') };
+}
+
+
+/**
+ * 查「用户现在在用手机吗」，以及目标 App 的风险等级。
+ *
+ * ## 为什么必须有这个工具
+ *
+ * `tools/user-busy.sh` 的判据是对的（topResumedActivity + mInputShown），
+ * 但它只是个脚本，不在工具链路里 —— 所以模型根本不知道要调它。
+ * 2026-11-17 抢键盘事故就是这么发生的：我用 mcp__phone__open 打开 Edge，
+ * 用户正在 DSH Go 里打字的 InputConnection 被 detach，半截草稿丢了。
+ *
+ * 同理 `docs/risk.json` 记了 42 个 App 的风控等级（带 forbid:["batch","pay"]），
+ * 但全库零引用 —— PLAYBOOK 里「L3 只读」只是散文，模型可以直接在微信/支付宝上
+ * 点发送转账，没有任何自动拦截。
+ *
+ * 这个工具把两件事变成机器可查的。
+ */
+export async function userState() {
+  const target = await adbTarget();
+  const run = (cmd) => new Promise((resolve) => {
+    import('node:child_process').then(({ execFile }) => {
+      execFile('adb', ['-s', target, 'shell', cmd], { timeout: 8000 }, (e, out) => {
+        resolve(String(out || ''));
+      });
+    });
+  });
+
+  const [front, ime] = await Promise.all([
+    run("dumpsys activity activities 2>/dev/null | grep -m1 topResumedActivity"),
+    run("dumpsys input_method 2>/dev/null | grep -m1 mInputShown"),
+  ]);
+
+  // 前台包名
+  let frontPkg = '';
+  const m = front.match(/([a-zA-Z][\w.]*)\/[\w.]*/);
+  if (m) frontPkg = m[1];
+
+  const imeShown = /mInputShown=true/.test(ime);
+  const dshFg = /dsh_app|ccch1mneyyy/.test(front);
+
+  // 判据：DSH Go 在前台 或 输入法挂着 → 用户在用
+  const busey = dshFg || imeShown;
+  const reasons = [];
+  if (dshFg) reasons.push('DSH Go 在前台（用户正在跟 AI 对话）');
+  if (imeShown) reasons.push('输入法正在显示（用户可能在打字）');
+
+  const lines = [
+    busey ? '🔴 用户正在用手机 —— 不要抢前台/抢键盘' : '🟢 用户没在用手机，可以操作',
+    '',
+    `前台 App：${frontPkg || '(查不到)'}`,
+    `输入法：${imeShown ? '显示中' : '收起'}`,
+  ];
+  if (reasons.length) {
+    lines.push('', '判据命中：', ...reasons.map((r) => `  · ${r}`));
+    lines.push('', '如果要操作主屏（am start / mcp__phone__type / input text），建议改走：',
+      '  · 虚拟屏（vdisplay_*）—— 不碰用户前台',
+      '  · 浏览器 CDP（web_*）—— 不抢焦点',
+      '  · 或等用户停下来');
+  }
+  return { text: lines.join('\n'), busy: busey, frontPkg, imeShown };
+}
+
+/** 查某个包的风控等级（读 docs/risk.json）。 */
+export async function riskCheck(pkg) {
+  const name = String(pkg || '').trim();
+  if (!name) return { text: '要给包名，比如 com.tencent.mm' };
+  let data = null;
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const rel of ['../docs/risk.json', '../../docs/risk.json']) {
+      try {
+        const raw = await readFile(join(here, rel), 'utf8');
+        data = JSON.parse(raw);
+        break;
+      } catch { /* 试下一个 */ }
+    }
+  } catch { /* ignore */ }
+  if (!data) return { text: '读不到 docs/risk.json（插件没带这个文件？）' };
+
+  const apps = data.apps || data;
+  const info = apps[name];
+  if (!info) {
+    return {
+      text: `未知 App（${name}）→ 按默认 L${data.unknown_level ?? 3} 处理：先只读观察，写操作前问用户。`,
+      level: data.unknown_level ?? 3,
+      name: '',
+    };
+  }
+  const LEVELS = {
+    0: 'L0 无风控 —— 随便操作',
+    1: 'L1 轻微 —— 控制频率即可',
+    2: 'L2 中等 —— 操作要拟人化',
+    3: 'L3 严格 —— 只读，写操作必须问用户',
+    4: 'L4 禁止 —— 银行/支付，只能交给人',
+    5: 'L5 硬边界 —— 技术上也做不到',
+  };
+  const lines = [
+    `${info.name || name}：${LEVELS[info.level] || ('L' + info.level)}`,
+    `包名：${name}`,
+  ];
+  if (info.readOnly) lines.push('⚠️ 标记为只读：不要点任何会改变状态的东西');
+  if (Array.isArray(info.forbid) && info.forbid.length) {
+    lines.push(`⚠️ 禁止动作：${info.forbid.join('、')}`);
+  }
+  return { text: lines.join('\n'), level: info.level, name: info.name || name, forbid: info.forbid || [] };
 }
 
 export async function apps() {

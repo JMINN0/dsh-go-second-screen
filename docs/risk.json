@@ -1,54 +1,307 @@
 {
   "_comment": "App 风控等级速查表。level: 0=零 1=弱 2=中 3=强 4=极强 5=特殊。查不到按 3 处理。",
-  "_updated": "2026-11-17",
+  "_updated": "2026-11-19",
   "apps": {
-    "com.android.settings":      {"level": 0, "name": "系统设置"},
-    "com.android.documentsui":   {"level": 0, "name": "文件"},
-    "me.zhanghai.android.files": {"level": 0, "name": "Material Files"},
-    "is.xyz.mpv":                {"level": 0, "name": "mpv"},
-    "com.termux":                {"level": 0, "name": "Termux"},
-    "org.fdroid.fdroid":         {"level": 0, "name": "F-Droid"},
-
-    "tv.danmaku.bili":           {"level": 1, "name": "B站"},
-    "com.google.android.youtube":{"level": 1, "name": "YouTube"},
-    "com.tencent.qqlive":        {"level": 1, "name": "腾讯视频"},
-    "com.qiyi.video":            {"level": 1, "name": "爱奇艺"},
-    "com.youku.phone":           {"level": 1, "name": "优酷"},
-    "com.tencent.weread":        {"level": 1, "name": "微信读书"},
-    "com.netease.cloudmusic":    {"level": 1, "name": "网易云音乐"},
-    "com.ximalaya.ting.android": {"level": 1, "name": "喜马拉雅"},
-
-    "com.sina.weibo":            {"level": 2, "name": "微博", "forbid": ["batch"]},
-    "com.xingin.xhs":            {"level": 2, "name": "小红书", "forbid": ["batch"]},
-    "com.zhihu.android":         {"level": 2, "name": "知乎", "forbid": ["batch"]},
-    "com.ss.android.ugc.aweme":  {"level": 2, "name": "抖音", "forbid": ["batch"]},
-    "com.taobao.taobao":         {"level": 2, "name": "淘宝", "forbid": ["batch", "pay"]},
-    "com.jingdong.app.mall":     {"level": 2, "name": "京东", "forbid": ["batch", "pay"]},
-    "com.xunmeng.pinduoduo":     {"level": 2, "name": "拼多多", "forbid": ["batch", "pay"]},
-    "com.taobao.idlefish":       {"level": 2, "name": "闲鱼", "forbid": ["batch", "pay"]},
-    "com.sankuai.meituan":       {"level": 2, "name": "美团", "forbid": ["batch", "pay"]},
-    "me.ele":                    {"level": 2, "name": "饿了么", "forbid": ["batch", "pay"]},
-    "com.sdu.didi.psnger":       {"level": 2, "name": "滴滴", "forbid": ["batch"]},
-    "com.autonavi.minimap":      {"level": 2, "name": "高德", "forbid": ["batch"]},
-
-    "com.tencent.mm":            {"level": 3, "name": "微信", "readOnly": true, "forbid": ["login","pay","face","write"]},
-    "com.tencent.mobileqq":      {"level": 3, "name": "QQ", "readOnly": true, "forbid": ["login","pay","face","write"]},
-    "com.eg.android.AlipayGphone":{"level":3,"name": "支付宝", "readOnly": true, "forbid": ["login","pay","face","write"]},
-    "com.unionpay":              {"level": 3, "name": "云闪付", "readOnly": true, "forbid": ["login","pay","face","write"]},
-    "cmb.pb":                    {"level": 3, "name": "招商银行", "readOnly": true, "forbid": ["login","pay","face","write"]},
-    "com.icbc":                  {"level": 3, "name": "工商银行", "readOnly": true, "forbid": ["login","pay","face","write"]},
-    "com.tmri.app.main":         {"level": 3, "name": "交管12123", "readOnly": true, "forbid": ["login","face","write"]},
-    "cn.gov.tax.its":            {"level": 3, "name": "个人所得税", "readOnly": true, "forbid": ["login","face","write"]},
-    "com.MobileTicket":          {"level": 3, "name": "12306", "readOnly": true, "forbid": ["login","pay","face","write"]},
-
-    "com.tencent.tmgp.sgame":    {"level": 4, "name": "王者荣耀", "forbid": ["all"]},
-    "com.tencent.tmgp.pubgmhd":  {"level": 4, "name": "和平精英", "forbid": ["all"]},
-    "com.miHoYo.Yuanshen":       {"level": 4, "name": "原神", "forbid": ["all"]},
-    "com.moutai.mall":           {"level": 4, "name": "i茅台", "forbid": ["all"]},
-    "cn.damai":                  {"level": 4, "name": "大麦", "forbid": ["all"]},
-
-    "com.netflix.mediaclient":   {"level": 5, "name": "Netflix", "forbid": ["screenshot"]},
-    "com.disney.disneyplus":     {"level": 5, "name": "Disney+", "forbid": ["screenshot"]}
+    "com.android.settings": {
+      "level": 0,
+      "name": "系统设置"
+    },
+    "com.android.documentsui": {
+      "level": 0,
+      "name": "文件"
+    },
+    "me.zhanghai.android.files": {
+      "level": 0,
+      "name": "Material Files"
+    },
+    "is.xyz.mpv": {
+      "level": 0,
+      "name": "mpv"
+    },
+    "com.termux": {
+      "level": 0,
+      "name": "Termux"
+    },
+    "org.fdroid.fdroid": {
+      "level": 0,
+      "name": "F-Droid"
+    },
+    "tv.danmaku.bili": {
+      "level": 1,
+      "name": "B站"
+    },
+    "com.google.android.youtube": {
+      "level": 1,
+      "name": "YouTube"
+    },
+    "com.tencent.qqlive": {
+      "level": 1,
+      "name": "腾讯视频"
+    },
+    "com.qiyi.video": {
+      "level": 1,
+      "name": "爱奇艺"
+    },
+    "com.youku.phone": {
+      "level": 1,
+      "name": "优酷"
+    },
+    "com.tencent.weread": {
+      "level": 1,
+      "name": "微信读书"
+    },
+    "com.netease.cloudmusic": {
+      "level": 1,
+      "name": "网易云音乐"
+    },
+    "com.ximalaya.ting.android": {
+      "level": 1,
+      "name": "喜马拉雅"
+    },
+    "com.sina.weibo": {
+      "level": 2,
+      "name": "微博",
+      "forbid": [
+        "batch"
+      ]
+    },
+    "com.xingin.xhs": {
+      "level": 2,
+      "name": "小红书",
+      "forbid": [
+        "batch"
+      ]
+    },
+    "com.zhihu.android": {
+      "level": 2,
+      "name": "知乎",
+      "forbid": [
+        "batch"
+      ]
+    },
+    "com.ss.android.ugc.aweme": {
+      "level": 2,
+      "name": "抖音",
+      "forbid": [
+        "batch"
+      ]
+    },
+    "com.taobao.taobao": {
+      "level": 2,
+      "name": "淘宝",
+      "forbid": [
+        "batch",
+        "pay"
+      ]
+    },
+    "com.jingdong.app.mall": {
+      "level": 2,
+      "name": "京东",
+      "forbid": [
+        "batch",
+        "pay"
+      ]
+    },
+    "com.xunmeng.pinduoduo": {
+      "level": 2,
+      "name": "拼多多",
+      "forbid": [
+        "batch",
+        "pay"
+      ]
+    },
+    "com.taobao.idlefish": {
+      "level": 2,
+      "name": "闲鱼",
+      "forbid": [
+        "batch",
+        "pay"
+      ]
+    },
+    "com.sankuai.meituan": {
+      "level": 2,
+      "name": "美团",
+      "forbid": [
+        "batch",
+        "pay"
+      ]
+    },
+    "me.ele": {
+      "level": 2,
+      "name": "饿了么",
+      "forbid": [
+        "batch",
+        "pay"
+      ]
+    },
+    "com.sdu.didi.psnger": {
+      "level": 2,
+      "name": "滴滴",
+      "forbid": [
+        "batch"
+      ]
+    },
+    "com.autonavi.minimap": {
+      "level": 2,
+      "name": "高德",
+      "forbid": [
+        "batch"
+      ]
+    },
+    "com.tencent.mm": {
+      "level": 3,
+      "name": "微信",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "pay",
+        "face",
+        "write"
+      ]
+    },
+    "com.tencent.mobileqq": {
+      "level": 3,
+      "name": "QQ",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "pay",
+        "face",
+        "write"
+      ]
+    },
+    "com.eg.android.AlipayGphone": {
+      "level": 3,
+      "name": "支付宝",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "pay",
+        "face",
+        "write"
+      ]
+    },
+    "com.unionpay": {
+      "level": 3,
+      "name": "云闪付",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "pay",
+        "face",
+        "write"
+      ]
+    },
+    "cmb.pb": {
+      "level": 3,
+      "name": "招商银行",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "pay",
+        "face",
+        "write"
+      ]
+    },
+    "com.icbc": {
+      "level": 3,
+      "name": "工商银行",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "pay",
+        "face",
+        "write"
+      ]
+    },
+    "com.tmri.app.main": {
+      "level": 3,
+      "name": "交管12123",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "face",
+        "write"
+      ]
+    },
+    "cn.gov.tax.its": {
+      "level": 3,
+      "name": "个人所得税",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "face",
+        "write"
+      ]
+    },
+    "com.MobileTicket": {
+      "level": 3,
+      "name": "12306",
+      "readOnly": true,
+      "forbid": [
+        "login",
+        "pay",
+        "face",
+        "write"
+      ]
+    },
+    "com.tencent.tmgp.sgame": {
+      "level": 4,
+      "name": "王者荣耀",
+      "forbid": [
+        "all"
+      ]
+    },
+    "com.tencent.tmgp.pubgmhd": {
+      "level": 4,
+      "name": "和平精英",
+      "forbid": [
+        "all"
+      ]
+    },
+    "com.miHoYo.Yuanshen": {
+      "level": 4,
+      "name": "原神",
+      "forbid": [
+        "all"
+      ]
+    },
+    "com.moutai.mall": {
+      "level": 4,
+      "name": "i茅台",
+      "forbid": [
+        "all"
+      ]
+    },
+    "cn.damai": {
+      "level": 4,
+      "name": "大麦",
+      "forbid": [
+        "all"
+      ]
+    },
+    "com.netflix.mediaclient": {
+      "level": 5,
+      "name": "Netflix",
+      "forbid": [
+        "screenshot"
+      ]
+    },
+    "com.disney.disneyplus": {
+      "level": 5,
+      "name": "Disney+",
+      "forbid": [
+        "screenshot"
+      ]
+    },
+    "com.mojang.minecraftpe": {
+      "level": 0,
+      "name": "Minecraft（单人）"
+    },
+    "com.android.chrome": {
+      "level": 1,
+      "name": "Chrome 浏览器"
+    }
   },
   "rules": {
     "unknown_level": 3,

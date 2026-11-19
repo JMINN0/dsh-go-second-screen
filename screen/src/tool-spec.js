@@ -84,7 +84,11 @@ export function inputSpec() {
       '- kind:"key"：发按键，如 KEYCODE_BACK / KEYCODE_ENTER。',
     ].join('\n'),
     parameters: {
-      kind: { type: 'string', required: true, description: 'tap | swipe | text | key | paste' },
+      kind: { type: 'string', required: true, description: 'tap | swipe | hold | text | key | paste。hold = 按住不动（游戏摇杆、长按菜单、持续挖方块），走 scrcpy 控制通道发 60Hz 连续 MOVE，实测比固定 14 步的 swipe 稳得多（后者 5 秒长按会退化成 3Hz，游戏当手指没动）。' },
+      ms: { type: 'integer', description: '时长毫秒。swipe 默认 300（滑动的快慢）；hold 默认 1000（按住的时长，长按菜单 800-1500，持续挖方块 3000-8000）。' },
+      jitter: { type: 'integer', description: 'hold：手指位置抖动幅度（逻辑像素），默认 2。真按不会绝对静止，设 0 会变成机器特征。' },
+      driftX: { type: 'integer', description: 'hold：按住期间缓慢横向漂移（逻辑像素），默认 0。摇杆往右推就设正数（比如 40）。' },
+      driftY: { type: 'integer', description: 'hold：按住期间缓慢纵向漂移，默认 0。摇杆往前推设负数（屏幕坐标 y 向下）。' },
       verify: { type: 'boolean', description: '默认 true：动作前后各取一次画面哈希，没变就返回"可能没生效"。传 false 跳过校验，实测省约 2 秒（两次 screencap 各约 1 秒），适合连续点同一界面。' },
       settleMs: { type: 'integer', description: '动作后等画面稳定的毫秒数，默认 500。' },
       shotAfter: { type: 'boolean', description: '动作后顺手截一张并返回路径（省掉单独调 vdisplay_shot 的一轮往返）。默认 false。' },
@@ -98,7 +102,6 @@ export function inputSpec() {
       y1: { type: 'integer', description: 'swipe 起点 y。' },
       x2: { type: 'integer', description: 'swipe 终点 x。' },
       y2: { type: 'integer', description: 'swipe 终点 y。' },
-      ms: { type: 'integer', description: 'swipe 时长毫秒，默认 300。' },
       key: { type: 'string', description: 'kind=key 时的按键名，例如 KEYCODE_BACK。' },
     },
     output: out('注入结果。'),
@@ -527,5 +530,49 @@ export function probeSecureSpec() {
       dir: { type: 'string', description: '截图输出目录，默认 /tmp。' },
     },
     output: out('verdict、置信度、判定理由、上下半亮度、dumpsys 里的 FLAG_SECURE 窗口数。'),
+  };
+}
+
+/**
+ * 查用户是否正在用手机。
+ *
+ * 这是把 `tools/user-busy.sh` 的判据变成工具 —— 那个脚本是对的，但不在工具链路里，
+ * 所以模型不知道要调它。2026-11-17 抢键盘事故就是没查这个。
+ */
+export function userStateSpec() {
+  return {
+    name: 'screen_user_state',
+    description: [
+      '查「用户现在在用手机吗」。**动主屏之前必须先调它。**',
+      '',
+      '判据：前台是 DSH Go（用户正在跟 AI 对话）或输入法正在显示（用户可能在打字）→ BUSY。',
+      '',
+      '为什么要有：`am start` / `mcp__phone__open` 会让新窗口成为焦点，',
+      '输入法的 InputConnection 从用户的输入框 detach —— 键盘被抢走、半截草稿丢失。',
+      '更危险的是 `input text` 会把文字拼进用户草稿，`input keyevent 66` 可能把草稿发出去。',
+      '',
+      '返回 BUSY 时改走：虚拟屏（vdisplay_*）、浏览器 CDP（web_*），或等用户停下来。',
+    ].join('\n'),
+    parameters: {},
+    output: out('BUSY/IDLE 判定、前台包名、输入法状态。'),
+  };
+}
+
+/** 查某个 App 的风控等级（读 docs/risk.json，42 个 App 已标注）。 */
+export function riskCheckSpec() {
+  return {
+    name: 'screen_risk',
+    description: [
+      '查某个 App 的风控等级，决定能用什么操作方式。',
+      '',
+      'L0 无风控 → 随便操作；L1 控制频率；L2 拟人化；',
+      'L3 严格 → 只读，写操作必须问用户；L4 银行/支付 → 只能交给人；L5 技术做不到。',
+      '',
+      '**操作微信/支付宝/银行/游戏之前先查这个。** 未知 App 按 L3 处理。',
+    ].join('\n'),
+    parameters: {
+      pkg: { type: 'string', required: true, description: '包名，比如 com.tencent.mm。不知道包名先用 vdisplay_apps 查。' },
+    },
+    output: out('风控等级、中文名、禁止动作列表。'),
   };
 }

@@ -8,7 +8,8 @@
  * 引擎自带的那份在 /opt/dsh/node_modules。只写裸包名会让 apply 直接失败。
  */
 import {
-  inputSpec, launchSpec, mainShotSpec, modesSpec, shotSpec, startSpec, statusSpec, stopSpec,
+  inputSpec, launchSpec, mainShotSpec, modesSpec, riskCheckSpec, shotSpec, startSpec, statusSpec,
+  stopSpec, userStateSpec,
   streamStartSpec, streamStopSpec, textSpec, appsSpec,
   poolSpec, newScreenSpec, useScreenSpec, closeScreenSpec, checkAppSpec,
   claimAppSpec, releaseAppSpec, leasesSpec,
@@ -95,6 +96,9 @@ export async function apply(ctx) {
             [waitStableSpec, (a) => T.waitStable(a)],
             [roiSpec, (a) => T.roi(a)],
             [probeSecureSpec, (a) => T.probeSecure(a)],
+              // 安全闸门（2026-11-19 对抗审查发现）：这两个能力一直缺
+              [userStateSpec, () => T.userState()],
+              [riskCheckSpec, (a) => T.riskCheck(a?.pkg)],
           ];
           for (const [spec, exec] of defs) {
             try {

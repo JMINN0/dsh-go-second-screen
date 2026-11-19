@@ -468,10 +468,17 @@ export async function streamStart(args) {
         const oldJ = JSON.parse(oldRaw);
         if (Array.isArray(oldJ.screens)) prevScreens = oldJ.screens;
       } catch { /* 第一次写 */ }
+      // **尺寸优先用 framesrv 查到的真实值**，不是调用方传的（可能没传 → 0x0）。
+      let meSize = (s.width && s.height) ? (s.width + 'x' + s.height) : '';
+      try {
+        const fsrv = await import('./framesrv.js');
+        const fi = await fsrv.info(Number(s.displayId));
+        if (fi && fi.size) meSize = fi.size;
+      } catch { /* 查不到就用估算 */ }
       const me = {
         displayId: Number(s.displayId), port: fast.port,
         aspect: s.width && s.height ? (s.width / s.height) : 0,
-        size: (s.width || 0) + 'x' + (s.height || 0),
+        size: meSize || '?',
       };
       const screens = prevScreens.filter((x) => Number(x.displayId) !== me.displayId);
       screens.push(me);
@@ -516,6 +523,20 @@ export async function streamStop(args) {
     if (p) await overlayStop(p);
     try { const fsrv = await import('./framesrv.js'); await fsrv.stop(oneId); } catch { /* ignore */ }
     screenPorts.delete(oneId);
+    // **从 stream.json 的 screens 里摘掉它**，否则胶囊/诊断会看到已经不存在的屏
+    try {
+      const { readFile, writeFile } = await import('node:fs/promises');
+      const { homedir } = await import('node:os');
+      const { join } = await import('node:path');
+      const f = join(homedir(), '.dsh', 'plugin-screen', 'stream.json');
+      const j = JSON.parse(await readFile(f, 'utf8'));
+      if (Array.isArray(j.screens)) {
+        j.screens = j.screens.filter((x) => Number(x.displayId) !== oneId);
+        // 全没了就标 not running
+        if (!j.screens.length) { j.running = false; j.port = 0; j.displayId = null; }
+        await writeFile(f, JSON.stringify(j));
+      }
+    } catch { /* 写不进去不影响停推流 */ }
     return { text: `已停掉 displayId=${oneId} 的推流` + (p ? `（端口 ${p}）` : '') };
   }
   await overlayStop();       // 先关悬浮窗，否则它会自己发现推流没了才关（多留一会儿）

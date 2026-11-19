@@ -576,3 +576,56 @@ export function riskCheckSpec() {
     output: out('风控等级、中文名、禁止动作列表。'),
   };
 }
+
+/**
+ * 按文字找位置。
+ *
+ * 现在模型是「看 OCR 返回的一堆 nx/ny，自己挑坐标去点」—— 实测 17.6% 点空率。
+ * 这两个工具把「找文字 → 算坐标」交给代码，模型不碰坐标。
+ */
+export function findTextSpec() {
+  return {
+    name: 'vdisplay_find',
+    description: [
+      '在虚拟屏上找文字，返回坐标（不点击）。',
+      '',
+      '**比让模型自己看 OCR 坐标再算要准得多** —— 模型算坐标是 17.6% 点空率的主因。',
+      '',
+      '匹配规则：默认「包含」（找「蓝牙」→ 「蓝牙 已开启」也算命中）；',
+      'mode=exact 精确匹配；mode=regex 正则。多个命中时默认取最靠上的，用 nth 指定第几个。',
+      '',
+      '没找到会给「相近的文字」建议，方便你换词重试。',
+      '',
+      '要直接点，用 vdisplay_tap_text —— 它一步完成找+点。',
+    ].join('\n'),
+    parameters: {
+      text: { type: 'string', required: true, description: '要找的文字，比如「蓝牙」「立即购买」' },
+      mode: { type: 'string', description: 'contains（默认）| exact | regex' },
+      nth: { type: 'integer', description: '多个命中时取第几个，从 0 开始，默认 0（最靠上的）' },
+      minConf: { type: 'number', description: 'OCR 置信度下限，默认 0.4' },
+    },
+    output: out('找到几处、目标坐标 nx/ny、命中文字。'),
+  };
+}
+
+/** 找到文字并点击 —— 一步完成，模型不碰坐标。 */
+export function tapTextSpec() {
+  return {
+    name: 'vdisplay_tap_text',
+    description: [
+      '找到文字并点击它。**这是最可靠的点击方式，优先用它代替自己算坐标。**',
+      '',
+      '一步完成：OCR 找文字 → 算中心坐标 → 注入点击 → 校验。',
+      '模型只需要说要找什么，不需要看坐标。',
+      '',
+      '实测价值：现在模型自己看 OCR 坐标去点有 17.6% 点空率，这个工具把那个环节消掉。',
+    ].join('\n'),
+    parameters: {
+      text: { type: 'string', required: true, description: '要点的文字，比如「立即购买」「确定」' },
+      mode: { type: 'string', description: 'contains（默认）| exact | regex' },
+      nth: { type: 'integer', description: '多个命中时点第几个，从 0 开始' },
+      verify: { type: 'boolean', description: '点击后校验画面有没有变化，默认 true' },
+    },
+    output: out('点到了什么、坐标、校验结果。'),
+  };
+}

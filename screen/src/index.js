@@ -15,6 +15,8 @@ import {
   claimAppSpec, releaseAppSpec, leasesSpec,
   // 感知层（2026-11-16）：常驻解码、实时帧、等稳定、自动 ROI、黑屏探针
   liveSpec, liveShotSpec, waitStableSpec, roiSpec, probeSecureSpec,
+  // 按文字找/点（2026-11-19）：消掉模型自己算坐标的 17.6% 点空率
+  findTextSpec, tapTextSpec,
 } from './tool-spec.js';
 import * as T from './tools.js';
 
@@ -99,6 +101,9 @@ export async function apply(ctx) {
               // 安全闸门（2026-11-19 对抗审查发现）：这两个能力一直缺
               [userStateSpec, () => T.userState()],
               [riskCheckSpec, (a) => T.riskCheck(a?.pkg)],
+              // 按文字找/点（2026-11-19）：消掉模型自己算坐标的 17.6% 点空率
+              [findTextSpec, (a) => T.findText(a)],
+              [tapTextSpec, (a) => T.tapText(a)],
           ];
           for (const [spec, exec] of defs) {
             try {

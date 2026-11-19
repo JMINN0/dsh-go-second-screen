@@ -531,6 +531,166 @@ export async function text(args) {
  *
  * 这个工具把两件事变成机器可查的。
  */
+
+/**
+ * 按文字找位置 / 按文字点击。
+ *
+ * ## 为什么必须有
+ *
+ * 现在模型是「看 OCR 返回的一堆 nx/ny，自己挑一个坐标去点」——
+ * 实测 17.6% 的点空率，主要原因是模型算坐标时会算错/挑错行。
+ *
+ * 这两个工具把「找文字 → 算坐标 → 点」变成一次调用，坐标由代码算，模型不用碰。
+ *
+ * ## 匹配规则
+ *
+ * 默认「包含」匹配（要找「蓝牙」，OCR 行的「蓝牙」或「蓝牙 已开启」都算命中）。
+ * 可以先精确匹配（exact），也可以正则（regex）。
+ * 多个命中时：默认取最靠上的（第一个），可以指定 nth。
+ */
+export async function findText(args) {
+  const need = String(args?.text || '').trim();
+  if (!need) return { text: '要给要找的文字，比如「蓝牙」' };
+
+  // **不要先调 text()**：那会 OCR 一次，然后下面又 OCR 一次，
+  // 实测浪费 2 秒（4.2s vs 2.1s）。直接走下面的单次识别。
+  const st = await vd.status();
+  if (!st.running) return { text: '虚拟屏没在运行。先 vdisplay_start。' };
+  const ocr = await import('./ocr.js');
+  const shot = await vd.shot(String(args?.dir || '/tmp'), {
+    width: Math.min(1080, Math.max(360, st.width || 720)), format: 'png',
+  });
+  if (!shot.ok) return { text: `截图失败：${shot.hint}` };
+  const rr = await ocr.recognize(shot.path, { minConf: args?.minConf ?? 0.4, maxLines: 200 });
+  if (!rr.ok) return { text: rr.hint };
+
+  const mode = String(args?.mode || 'contains');
+  const rx = mode === 'regex' ? new RegExp(need) : null;
+  const hits = [];
+  for (const l of rr.lines) {
+    const t = String(l.text || '');
+    let hit = false;
+    if (mode === 'exact') hit = t.trim() === need;
+    else if (mode === 'regex') hit = rx.test(t);
+    else hit = t.includes(need) || need.includes(t.trim()) && t.trim().length > 0;
+    if (hit) hits.push(l);
+  }
+  if (!hits.length) {
+    const near = rr.lines
+      .map((l) => ({ l, d: levenshtein(need, String(l.text || '')) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 3)
+      .filter((x) => x.d <= Math.max(2, need.length));
+    const hint = near.length
+      ? '相近的有：' + near.map((x) => `「${x.l.text}」`).join('、')
+      : '屏幕上没找到相近文字';
+    return { text: `没找到「${need}」。${hint}`, found: 0 };
+  }
+
+  const W = shot.width || 720, H = shot.height || 1280;
+  const nth = Math.min(Math.max(0, Number(args?.nth) || 0), hits.length - 1);
+  const target = hits[nth];
+  const cx = (target.x + target.w / 2) / W;
+  const cy = (target.y + target.h / 2) / H;
+
+  const lines = [
+    `找到 ${hits.length} 处「${need}」，用第 ${nth + 1} 处：`,
+  ];
+  hits.slice(0, 5).forEach((l, i) => {
+    const x = ((l.x + l.w / 2) / W).toFixed(3);
+    const y = ((l.y + l.h / 2) / H).toFixed(3);
+    lines.push(`  ${i === nth ? '→' : ' '} 「${l.text}」 nx=${x} ny=${y}`);
+  });
+  if (hits.length > 5) lines.push(`  …还有 ${hits.length - 5} 处`);
+  lines.push('', `目标坐标：nx=${cx.toFixed(3)} ny=${cy.toFixed(3)}`);
+  lines.push('要直接点，用 vdisplay_tap_text（它会自己找坐标，不用你传）。');
+
+  return { text: lines.join('\n'), found: hits.length, nx: cx, ny: cy, label: String(target.text || '') };
+}
+
+/**
+ * 找到文字并点它 —— 一次调用完成「找 → 算坐标 → 点 → 确认」。
+ *
+ * ## 为什么校验要自己重做，不能用 input() 返回的 changed
+ *
+ * 实测踩到：点「蓝牙」明明跳进了蓝牙设置页，但 `input()` 的画面哈希校验
+ * 报「画面在 2 秒内一直没有变化」—— **假失败**。
+ *
+ * 原因：`frameHash()` 用两次 screencap 比 SHA1，而页面跳转的转场时间
+ * 可能超过检查窗口，或者两次截图都截在转场前。
+ *
+ * 假失败比不校验更糟：调用方会重试 → 重复操作（点两次「购买」）。
+ *
+ * 所以这里改成**用 OCR 判断页面身份变了没有**：
+ * 点之前记一个屏指纹，点之后等一会儿再取一次，不同就算成功。
+ * 这个判据慢一点（多一次 OCR），但它判断的是「页面确实变了」，不是「像素闪了一下」。
+ */
+export async function tapText(args) {
+  const r = await findText(args);
+  if (!r.found) return r;
+
+  // 点击前记画面指纹（8×8 灰度 dHash，很便宜）
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const st0 = await vd.status();
+  const grab = async () => {
+    try {
+      const r2 = await vd.shot('/tmp', { width: 160, format: 'png' });
+      if (r2.ok !== false) return r2.hash || r2.path || null;
+    } catch { /* ignore */ }
+    return null;
+  };
+  const before = await grab();
+
+  const t = await input({
+    kind: 'tap', nx: r.nx, ny: r.ny,
+    verify: false,          // 不用它的哈希校验（会假失败），下面自己做
+    shotAfter: false,
+  });
+
+  // 等页面稳定（转场通常 200-600ms；这里给足 1.2 秒）
+  await new Promise((res) => setTimeout(res, 1200));
+
+  const after = await grab();
+  const pageChanged = !!(before && after && before !== after);
+  const tapOk = !/失败|不允许|不可用/.test(String(t.text || ''));
+
+  const verdict = !tapOk
+    ? '⚠️ 注入失败'
+    : pageChanged
+      ? '✅ 点了，页面已变化'
+      : '✅ 点了（页面没变化 —— 可能是开关类控件，或这个页面本来就该保持）';
+
+  return {
+    text: `${verdict}\n点击目标：「${r.label}」 nx=${r.nx.toFixed(3)} ny=${r.ny.toFixed(3)}\n`
+      + `画面：${pageChanged ? '变了' : '没变'}`,
+    clicked: tapOk,
+    pageChanged,
+    label: r.label,
+    nx: r.nx, ny: r.ny,
+  };
+}
+
+/** 编辑距离（用于「没找到」时给相近建议）。 */
+function levenshtein(a, b) {
+  a = String(a); b = String(b);
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
 export async function userState() {
   const target = await adbTarget();
   const run = (cmd) => new Promise((resolve) => {

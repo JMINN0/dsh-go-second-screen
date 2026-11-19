@@ -574,7 +574,13 @@ export async function findText(args) {
     width: Math.min(1080, Math.max(360, st.width || 720)), format: 'png',
   });
   if (!shot.ok) return { text: `截图失败：${shot.hint}` };
-  const rr = await ocr.recognize(shot.path, { minConf: args?.minConf ?? 0.4, maxLines: 200 });
+  // **必须传 hash**，否则 cacheKey 为 null、缓存对 find/tap_text 完全不生效 ——
+  // 而这两个正是循环里最常用的工具（对抗审查 + OCR 专项审查都指出）。
+  const rr = await ocr.recognize(shot.path, {
+    minConf: args?.minConf ?? 0.4,
+    maxLines: 200,
+    hash: args?.fresh ? null : shot.hash,
+  });
   if (!rr.ok) return { text: rr.hint };
 
   const mode = String(args?.mode || 'contains');
@@ -618,7 +624,13 @@ export async function findText(args) {
   lines.push('', `目标坐标：nx=${cx.toFixed(3)} ny=${cy.toFixed(3)}`);
   lines.push('要直接点，用 vdisplay_tap_text（它会自己找坐标，不用你传）。');
 
-  return { text: lines.join('\n'), found: hits.length, nx: cx, ny: cy, label: String(target.text || '') };
+  return {
+    text: lines.join('\n'), found: hits.length, nx: cx, ny: cy,
+    label: String(target.text || ''),
+    // **把这张截图传出去给 tapText 复用。**
+    // tapText 原来自己又截一张（376ms），纯浪费 —— findText 刚刚才截过同一屏。
+    shotPath: shot.path, shotHash: shot.hash,
+  };
 }
 
 /**
@@ -642,18 +654,12 @@ export async function tapText(args) {
   const r = await findText(args);
   if (!r.found) return r;
 
-  // 点击前记画面指纹（8×8 灰度 dHash，很便宜）
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const st0 = await vd.status();
-  const grab = async () => {
-    try {
-      const r2 = await vd.shot('/tmp', { width: 160, format: 'png' });
-      if (r2.ok !== false) return r2.hash || r2.path || null;
-    } catch { /* ignore */ }
-    return null;
-  };
-  const before = await grab();
+  // **点击前记画面指纹 —— 复用 findText 已经截过的那张图，不再单独截。**
+  // 原来这里额外调一次 vd.shot(160 宽)，250-400ms；加上后面的固定 1.2 秒，
+  // tap_text 真实墙钟 4.2-6.2 秒（OCR 专项审查指出）。
+  const V = await import('./vision.js');
+  // **复用 findText 刚截的那张**，不再多截一次（省 376ms）。
+  const before = r.shotHash || null;
 
   const t = await input({
     kind: 'tap', nx: r.nx, ny: r.ny,
@@ -661,10 +667,15 @@ export async function tapText(args) {
     shotAfter: false,
   });
 
-  // 等页面稳定（转场通常 200-600ms；这里给足 1.2 秒）
-  await new Promise((res) => setTimeout(res, 1200));
-
-  const after = await grab();
+  // **等一次就够，不要循环截图。**
+  // 我第一版写成「每 150ms 截一张比对」—— 每张截图 376ms，
+  // 循环三次就是 1.1 秒，反而比固定 1.2 秒还慢（实测 tapText 5.9 秒）。
+  // 改成：等 500ms（覆盖多数转场）→ 截一张 → 比一次。最多再补一次。
+  // 只后验一次：多数转场 500ms 内完成，截两次的第二次基本是白等。
+  let after = null;
+  await new Promise((res) => setTimeout(res, 500));
+  const g2 = await grabFullPng();
+  if (g2.ok) after = (await V.dhash(g2.path)).hash;
   const pageChanged = !!(before && after && before !== after);
   const tapOk = !/失败|不允许|不可用/.test(String(t.text || ''));
 
@@ -861,12 +872,17 @@ export function keepAlive(args) {
  * dumpsys window displays，实测多花 ~250ms。vd.shot() 自己会做必要的检查。
  */
 async function grabFullPng() {
-  const shot = await vd.shot('/tmp', { width: 1080, format: 'png' });
-  if (!shot.ok) {
-    return { ok: false, hint: String(shot.hint || '').includes('没在运行')
-      ? '虚拟屏没在运行。先 vdisplay_start。'
-      : `截图失败：${shot.hint}` };
+  // **零开销守卫：屏没建就直接返回，不能让 vd.shot() 静默建一块。**
+  // vd.shot 第一行是 start()，displayId 为空时会完整建屏（1.8 秒）——
+  // 一个只读探测工具（fingerprint/probe/diff）顺手建了一块屏还留着，
+  // 再截到全黑空屏，用户完全不知道发生了什么（对抗审查 S16）。
+  // 用 getActive() 而不是 status()：后者要 3 次 dumpsys（约 250ms）。
+  const st = vd.getActive();
+  if (!st || !st.displayId) {
+    return { ok: false, hint: '虚拟屏没在运行。先 vdisplay_start 建屏，再调这个工具。' };
   }
+  const shot = await vd.shot('/tmp', { width: 1080, format: 'png' });
+  if (!shot.ok) return { ok: false, hint: `截图失败：${shot.hint}` };
   return { ok: true, path: shot.path, width: shot.width, height: shot.height };
 }
 
@@ -1505,11 +1521,18 @@ export async function live(args) {
   }
   if (action === 'stop') {
     const r = await vd.stopLive();
-    return { ok: true, ...r };
+    // **必须给 text**：out() 的 schema 里 text 是 required，
+    // 少了模型拿到空结果（同文件其他分支都写了，这两处漏了 —— 审查 S13）。
+    return { text: `常驻解码器已停止${r?.hint ? '：' + r.hint : '。'}`, ok: true, ...r };
   }
   const s = await vd.videoStats();
+  const ready = Boolean(s.headerDone && !s.headerError);
   return {
-    ok: Boolean(s.headerDone && !s.headerError),
+    text: ready
+      ? `解码器 ${s.decoder ? '在跑' : '未启动'}；流 ${s.width}x${s.height}，${s.frames} 帧，${s.fps || 0} fps；`
+        + `${s.hasKeyframe ? '已收到关键帧' : '还没关键帧（画面静止时不发帧，正常）'}。`
+      : '视频流还没接上（先 vdisplay_start 建屏）。',
+    ok: ready,
     width: s.width,
     height: s.height,
     frames: s.frames,

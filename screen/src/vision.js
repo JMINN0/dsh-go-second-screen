@@ -44,8 +44,15 @@ function spawnHelper() {
   if (state.child) return true;
   if (state.started) return false;
   state.started = true;
+  // **每次 spawn 前清残留。**
+  // S7：上一次 helper 写了一半 JSON 就被杀，残留半行会和新进程的 ready 行拼在一起，
+  // JSON.parse 失败 → ready 永远 false → 每次调用等 10 秒超时，而进程是活的所以不重建。
+  // S6：error 状态不复位的话，"装好 python3 也要重载插件才恢复"。
+  state.buf = '';
+  state.error = null;
+  state.ready = false;
   try {
-    if (!existsSync(HELPER)) { state.error = '缺 vision_helper.py'; return false; }
+    if (!existsSync(HELPER)) { state.error = '缺 vision_helper.py'; state.started = false; return false; }
     const child = spawn('python3', [HELPER], { stdio: ['pipe', 'pipe', 'pipe'] });
     state.child = child;
     child.stdout.setEncoding('utf8');
@@ -77,10 +84,25 @@ function spawnHelper() {
       state.child = null;
       state.ready = false;
       state.started = false;
+      state.buf = '';   // 进程没了，残留的半个 JSON 必须丢掉
       for (const [, p] of state.pending) { clearTimeout(p.timer); p.resolve({ ok: false, hint: 'vision 助手退出了' }); }
       state.pending.clear();
     });
-    child.on('error', (e) => { state.error = String(e?.message || e); });
+    // **S6：error 时要把 started 复位。**
+    // ENOENT 时 Node 可能只发 error 不发 exit，started 会永远 true →
+    // spawnHelper 直接 return false，之后每次都报同一句"起不来"，
+    // 装好 python3 也得重载插件才恢复（ocr.js 是对的，vision 退步了）。
+    child.on('error', (e) => {
+      state.error = String(e?.message || e);
+      state.child = null;
+      state.ready = false;
+      state.started = false;
+      for (const [, p] of state.pending) {
+        clearTimeout(p.timer);
+        p.resolve({ ok: false, hint: 'vision 助手启动失败：' + state.error });
+      }
+      state.pending.clear();
+    });
     return true;
   } catch (e) {
     state.error = String(e?.message || e);
@@ -157,8 +179,15 @@ export function info() {
 
 /** 收工。 */
 export function shutdown() {
+  // **先 flush pending 再杀**，否则正在等的调用会一直挂到 15 秒超时。
+  for (const [, p] of state.pending) {
+    clearTimeout(p.timer);
+    p.resolve({ ok: false, hint: 'vision 助手已关闭' });
+  }
+  state.pending.clear();
   try { state.child?.kill('SIGKILL'); } catch { /* ignore */ }
   state.child = null;
   state.ready = false;
   state.started = false;
+  state.buf = '';
 }

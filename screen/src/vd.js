@@ -26,7 +26,7 @@ import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import net from 'node:net';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -294,6 +294,65 @@ function clearPersistedState() {
  *   · pool 切换时执行 `setActive(ctx)`，之后的调用自然作用在那块屏上
  *   · 没有并发问题，因为 daemon 已经把有副作用的命令串行化了
  */
+/**
+ * 清掉「上一次截图」留下的全部坐标基准。
+ *
+ * **必须一次清全 8 个字段。** 原来 stop() 只清 3 个（hash/path/imgWidth），
+ * 漏了 lastShotRegion 和 lastShotImgHeight —— 于是 `shot(region) → stop → start → 点击`
+ * 会拿上一块屏的 region 偏移和缩放比去换算，点歪（对抗审查 S15）。
+ *
+ * forget() 当时清了 region，stop() 没清，两处不一致本身就是 bug 的温床。
+ */
+/**
+ * 清理 /tmp 里过期的截图。
+ *
+ * **为什么必须有**：每次截图写一个 vd-<时间戳>.png（720×1592 约 1-1.5MB），
+ * 从不删除。`/tmp` 在 proot 里是 tmpfs —— 占的是内存。
+ * 几十次视觉调用后就是几十上百 MB 常驻，用户只看到"内存怎么越来越少"。
+ *
+ * 策略：每次截图后顺手清一次，只留最近 20 个、且删除超过 10 分钟的。
+ * 同步操作很快（一个目录枚举 + 若干 unlink），不影响截图延迟。
+ */
+let lastJanitorAt = 0;
+function cleanShotDir(dir = '/tmp') {
+  const now = Date.now();
+  if (now - lastJanitorAt < 30_000) return;   // 最多 30 秒清一次
+  lastJanitorAt = now;
+  try {
+    const names = readdirSync(dir).filter((f) => /^(vd|main)-\d+\.png$/.test(f));
+    if (names.length <= 20) {
+      // 数量不多时只删超龄的
+      for (const f of names) {
+        try {
+          const st2 = statSync(`${dir}/${f}`);
+          if (now - st2.mtimeMs > 600_000) rmSync(`${dir}/${f}`, { force: true });
+        } catch { /* ignore */ }
+      }
+      return;
+    }
+    // 按名字里的时间戳排序（就是生成顺序），删最老的
+    const sorted = names.slice().sort((a, b) => {
+      const ta = Number((a.match(/(\d+)\.png$/) || [])[1] || 0);
+      const tb = Number((b.match(/(\d+)\.png$/) || [])[1] || 0);
+      return ta - tb;
+    });
+    for (const f of sorted.slice(0, sorted.length - 20)) {
+      try { rmSync(`${dir}/${f}`, { force: true }); } catch { /* ignore */ }
+    }
+  } catch { /* 清理失败不影响截图 */ }
+}
+
+function resetShotBasis() {
+  state.lastShotHash = null;
+  state.lastShotPath = null;
+  state.lastShotImgWidth = 0;
+  state.lastShotImgHeight = 0;
+  state.lastShotW = 0;
+  state.lastShotH = 0;
+  state.lastShotRegion = null;
+  state.lastShotCacheKey = null;
+}
+
 function makeState() {
   return {
   child: null,
@@ -693,8 +752,7 @@ export async function stop({ forceStopApps = false } = {}) {
   state.videoReader = null;
   state.child = null;
   state.displayId = null; state.sfId = null; state.scid = null; state.port = null;
-  state.lastShotHash = null; state.lastShotPath = null;
-  state.lastShotImgWidth = 0;   // 不清的话 stop→start 后坐标换算会用上旧宽度（偏 44%）
+  resetShotBasis();             // **8 个字段一次清全**（原来只清 3 个，region 会漏）
   state.launchedPkgs = [];
   return {
     ok: true,
@@ -1903,6 +1961,11 @@ export async function shot(dir = '/tmp', { width = 540, format = 'jpeg', cropPx 
         // 拿不到尺寸就退回 720x1280 的默认值，算出来的坐标全偏。
         return {
           ok: true, path: state.lastShotPath, displayId: state.displayId, unchanged: true,
+          // **必须带 hash。**
+          // 这条是「画面没变，复用上次截图」的快路 —— 而它恰恰是最该命中 OCR 缓存的时候。
+          // 原来这里不返回 hash，调用方拿到 undefined → cacheKey=null → 缓存永远不命中
+          // → 每次仍然白跑 1.6 秒 OCR（对抗审查 + OCR 专项审查都指出了这个洞）。
+          hash: state.lastShotHash,
           width: state.lastShotW || state.width, height: state.lastShotH || state.height,
           imageWidth: state.lastShotImgWidth || state.width,
           imageHeight: state.lastShotImgHeight || state.height,

@@ -1,4 +1,28 @@
-# 多点触控：发了但设备拒绝 —— 实测失败记录
+# 多点触控：从失败到成功 —— 完整记录
+
+> **2026-11-19 晚更新：已修复。** 下面保留失败过程，因为根因很有价值。
+>
+> **根因（反编译 scrcpy classes.dex 得到）**：
+> scrcpy 服务端自己算 pointer index 并 OR 上 ACTION_POINTER_DOWN(5)/UP(6)：
+> usage: smali [-v] [-h] [<command [<args>]]
+
+Options:
+  -h,-?,--help - Show usage information
+  -v,--version - Print the version of baksmali and then exit
+
+Commands:
+  assemble(ass,as,a) - Assembles smali files into a dex file.
+  help(h) - Shows usage information
+
+See smali help <command> for more information about a specific command
+> **我们只要发基础 action(0=DOWN/1=UP/2=MOVE)，不要自己编码 index。**
+> 之前发 ， 截成 5，scrcpy 收到不认识的值 → Inconsistent event。
+>
+> **修复后实测**：双指 76 帧发出，、，App 在前台时正常投递。
+
+---
+
+# 原始失败记录（保留）
 
 > 2026-11-19。**这是失败记录，不是能力说明。** 记下来避免下次重踩。
 

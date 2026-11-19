@@ -296,24 +296,31 @@ export function buildSwipe(o) {
  * 游戏里双手操作（一边走一边转视角、双指缩放、同时按两个技能）
  * 全都需要两指同时按下。
  *
- * ## Android 的 ACTION 编码
+ * ## **关键：不要自己编码 ACTION_POINTER_DOWN**
  *
- * 单指：ACTION_DOWN(0) / ACTION_UP(1) / ACTION_MOVE(2)
- * 多指：ACTION_POINTER_DOWN(5) / ACTION_POINTER_UP(6)
- *       **index 编在 action 的高 8 位**：action | (index << 8)
- *       index 是「第几个手指」，不是 pointerId。
+ * 第一版我按 Android 的约定把 index 编进 action 高 8 位（5 | 1<<8 = 261），
+ * 结果设备报 `InputDispatcher: Inconsistent event`。
  *
- * ## 序列
+ * 反编译 scrcpy-server 的 classes.dex（baksmali 到 smali）后看到真相：
  *
- *   指0 DOWN(0)        pointerId=0
- *   指1 DOWN(5|1<<8)   pointerId=1   ← 第二指按下
- *   两指 MOVE(2)       各发一条
- *   指1 UP(6|1<<8)     pointerId=1
- *   指0 UP(1)          pointerId=0
+ *   :cond_8c                        # action == UP 且还有其他指针
+ *       shl-int/lit8 v1, v10, 0x8   #   action = (pointerIndex << 8)
+ *       or-int/lit8  v1, v1, 0x6    #   action |= 6  → ACTION_POINTER_UP
+ *   :cond_93                        # action == DOWN 且还有其他指针
+ *       shl-int/lit8 v1, v10, 0x8   #   action = (pointerIndex << 8)
+ *       or-int/lit8  v1, v1, 0x5    #   action |= 5  → ACTION_POINTER_DOWN
  *
- * 【推断】scrcpy 服务端用 PointersState 管理 pointerId，
- * 会自动算 index，所以这里 index 只要和发送顺序一致即可。
- * **未实测** —— 需要看 dumpsys input 里有没有 ACTION_POINTER_DOWN。
+ * **scrcpy 服务端自己算 index 并 OR 上 5/6。**
+ * 我们只要发基础 action（0=DOWN / 1=UP / 2=MOVE），它负责转换。
+ * 自己编码反而被截断成 5，scrcpy 收到不认识的值 → 事件被丢。
+ *
+ * ## 序列（全部用基础 action）
+ *
+ *   指0 DOWN(0)   pointerId=0
+ *   指1 DOWN(0)   pointerId=1   ← scrcpy 自动转成 POINTER_DOWN
+ *   两指 MOVE(2)  各发一条
+ *   指1 UP(1)     pointerId=1   ← scrcpy 自动转成 POINTER_UP
+ *   指0 UP(1)     pointerId=0
  */
 
 export const ACTION_MULTI = {
@@ -362,7 +369,7 @@ export function buildMultiTouch(o) {
 
   // ② 第二指按下（ACTION_POINTER_DOWN，index=1）
   bufs.push(buildTouch({
-    action: withIndex(ACTION_MULTI.POINTER_DOWN, 1), x: p2.x, y: p2.y, screenW, screenH,
+    action: ACTION.DOWN, x: p2.x, y: p2.y, screenW, screenH,   // scrcpy 自动转 POINTER_DOWN
     pointerId: P2, pressure: 0.45, actionButton: btn, buttons: btn,
   }));
   delays.push(30);
@@ -391,7 +398,7 @@ export function buildMultiTouch(o) {
 
   // ④ 第二指抬起（ACTION_POINTER_UP，index=1）
   bufs.push(buildTouch({
-    action: withIndex(ACTION_MULTI.POINTER_UP, 1), x: to.x, y: to.y, screenW, screenH,
+    action: ACTION.UP, x: to.x, y: to.y, screenW, screenH,   // scrcpy 自动转 POINTER_UP
     pointerId: P2, pressure: 0.3, actionButton: 0, buttons: 0,
   }));
   delays.push(30);

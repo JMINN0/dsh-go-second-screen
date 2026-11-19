@@ -85,8 +85,11 @@ export function inputSpec() {
       '- kind:"key"：发按键，如 KEYCODE_BACK / KEYCODE_ENTER。',
     ].join('\n'),
     parameters: {
-      kind: { type: 'string', required: true, description: 'tap | swipe | hold | text | key | paste。hold = 按住不动（游戏摇杆、长按菜单、持续挖方块），走 scrcpy 控制通道发 60Hz 连续 MOVE，实测比固定 14 步的 swipe 稳得多（后者 5 秒长按会退化成 3Hz，游戏当手指没动）。' },
-      ms: { type: 'integer', description: '时长毫秒。swipe 默认 300（滑动的快慢）；hold 默认 1000（按住的时长，长按菜单 800-1500，持续挖方块 3000-8000）。' },
+      kind: { type: 'string', required: true, description: 'tap | swipe | hold | text | key | paste。hold = 按住不动（游戏摇杆/长按/挖方块），60Hz 连续 MOVE，实测可用。**multitouch 暂不可用**（代码在，但设备拒绝报 Inconsistent event，见 tests/MULTITOUCH-FAILED.md）—— 需要双手操作时用两次独立的 hold/swipe 近似。' },
+      ms: { type: 'integer', description: '时长毫秒。swipe 默认 300；hold 默认 1000（按住的时长）；multitouch 默认 600。' },
+      p1: { type: 'object', additionalProperties: false, properties: { nx: { type: 'number', description: '第一指 x 0-1' }, ny: { type: 'number', description: '第一指 y 0-1' } }, description: 'multitouch：第一指位置（通常是摇杆，按住不动）' },
+      p2: { type: 'object', additionalProperties: false, properties: { nx: { type: 'number' }, ny: { type: 'number' } }, description: 'multitouch：第二指起点（通常是视角滑动起点）' },
+      p2To: { type: 'object', additionalProperties: false, properties: { nx: { type: 'number' }, ny: { type: 'number' } }, description: 'multitouch：第二指终点。省略则第二指不动' },
       jitter: { type: 'integer', description: 'hold：手指位置抖动幅度（逻辑像素），默认 2。真按不会绝对静止，设 0 会变成机器特征。' },
       driftX: { type: 'integer', description: 'hold：按住期间缓慢横向漂移（逻辑像素），默认 0。摇杆往右推就设正数（比如 40）。' },
       driftY: { type: 'integer', description: 'hold：按住期间缓慢纵向漂移，默认 0。摇杆往前推设负数（屏幕坐标 y 向下）。' },

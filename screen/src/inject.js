@@ -286,3 +286,123 @@ export function buildSwipe(o) {
 
   return { bufs, totalMs, delays };
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 多点触控（双指）
+ *
+ * ## 为什么之前没有
+ *
+ * `buildTouch` 本来就带 pointerId 字段，但一直只发单指。
+ * 游戏里双手操作（一边走一边转视角、双指缩放、同时按两个技能）
+ * 全都需要两指同时按下。
+ *
+ * ## Android 的 ACTION 编码
+ *
+ * 单指：ACTION_DOWN(0) / ACTION_UP(1) / ACTION_MOVE(2)
+ * 多指：ACTION_POINTER_DOWN(5) / ACTION_POINTER_UP(6)
+ *       **index 编在 action 的高 8 位**：action | (index << 8)
+ *       index 是「第几个手指」，不是 pointerId。
+ *
+ * ## 序列
+ *
+ *   指0 DOWN(0)        pointerId=0
+ *   指1 DOWN(5|1<<8)   pointerId=1   ← 第二指按下
+ *   两指 MOVE(2)       各发一条
+ *   指1 UP(6|1<<8)     pointerId=1
+ *   指0 UP(1)          pointerId=0
+ *
+ * 【推断】scrcpy 服务端用 PointersState 管理 pointerId，
+ * 会自动算 index，所以这里 index 只要和发送顺序一致即可。
+ * **未实测** —— 需要看 dumpsys input 里有没有 ACTION_POINTER_DOWN。
+ */
+
+export const ACTION_MULTI = {
+  DOWN: 0, UP: 1, MOVE: 2, CANCEL: 3,
+  POINTER_DOWN: 5, POINTER_UP: 6,
+};
+
+/** 把「第几指」编进 action。 */
+function withIndex(action, index) {
+  return (action | (index << 8)) & 0xffff;
+}
+
+/**
+ * 生成双指手势的报文序列。
+ *
+ * @param {object} o
+ * @param {{x:number,y:number}} o.p1 第一指（比如摇杆位置）
+ * @param {{x:number,y:number}} o.p2 第二指（比如视角滑动起点）
+ * @param {{x:number,y:number}} [o.p2To] 第二指的终点（滑动）
+ * @param {number} o.screenW
+ * @param {number} o.screenH
+ * @param {number} [o.ms=600] 总时长
+ * @param {number} [o.p1DriftX=0] 第一指期间横向漂移
+ * @param {number} [o.p1DriftY=0] 第一指期间纵向漂移
+ * @param {boolean} [o.releaseP1=true] 结束时抬不抬第一指
+ */
+export function buildMultiTouch(o) {
+  const { p1, p2, p2To, screenW, screenH } = o;
+  const totalMs = Math.max(120, Number(o.ms) || 600);
+  const steps = Math.max(4, Math.min(240, Math.round(totalMs / 16.7)));  // ~60Hz
+  const driftX = Number(o.p1DriftX) || 0;
+  const driftY = Number(o.p1DriftY) || 0;
+  const to = p2To || p2;
+  const bufs = [];
+  const delays = [];
+
+  const P1 = 0n, P2 = 1n;          // pointerId
+  const btn = BUTTON_PRIMARY;
+
+  // ① 第一指按下
+  bufs.push(buildTouch({
+    action: ACTION.DOWN, x: p1.x, y: p1.y, screenW, screenH,
+    pointerId: P1, pressure: 0.45, actionButton: btn, buttons: btn,
+  }));
+  delays.push(30);
+
+  // ② 第二指按下（ACTION_POINTER_DOWN，index=1）
+  bufs.push(buildTouch({
+    action: withIndex(ACTION_MULTI.POINTER_DOWN, 1), x: p2.x, y: p2.y, screenW, screenH,
+    pointerId: P2, pressure: 0.45, actionButton: btn, buttons: btn,
+  }));
+  delays.push(30);
+
+  // ③ 两指同时 MOVE
+  const frameMs = Math.max(8, Math.round(totalMs / steps));
+  for (let i = 1; i <= steps; i += 1) {
+    const t = i / steps;
+    // 第一指：缓慢漂移（摇杆推方向）
+    const x1 = p1.x + driftX * t + (Math.random() - 0.5) * 2;
+    const y1 = p1.y + driftY * t + (Math.random() - 0.5) * 2;
+    // 第二指：从 p2 线性走到 p2To（转视角）
+    const x2 = p2.x + (to.x - p2.x) * t;
+    const y2 = p2.y + (to.y - p2.y) * t;
+    const env = 0.45 + Math.sin(Math.PI * t) * 0.45;
+    bufs.push(buildTouch({
+      action: ACTION.MOVE, x: x1, y: y1, screenW, screenH,
+      pointerId: P1, pressure: env, actionButton: btn, buttons: btn,
+    }));
+    bufs.push(buildTouch({
+      action: ACTION.MOVE, x: x2, y: y2, screenW, screenH,
+      pointerId: P2, pressure: env, actionButton: btn, buttons: btn,
+    }));
+    delays.push(frameMs);
+  }
+
+  // ④ 第二指抬起（ACTION_POINTER_UP，index=1）
+  bufs.push(buildTouch({
+    action: withIndex(ACTION_MULTI.POINTER_UP, 1), x: to.x, y: to.y, screenW, screenH,
+    pointerId: P2, pressure: 0.3, actionButton: 0, buttons: 0,
+  }));
+  delays.push(30);
+
+  // ⑤ 第一指抬起
+  if (o.releaseP1 !== false) {
+    bufs.push(buildTouch({
+      action: ACTION.UP, x: p1.x + driftX, y: p1.y + driftY, screenW, screenH,
+      pointerId: P1, pressure: 0.2, actionButton: 0, buttons: 0,
+    }));
+  }
+
+  return { bufs, delays, totalMs };
+}

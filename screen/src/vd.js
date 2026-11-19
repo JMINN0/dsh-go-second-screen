@@ -1641,6 +1641,43 @@ export async function input(kind, a = {}) {
     }
     // 和 tap/swipe 一致：直接 return，不设外层变量
     return { ok: sentH > 0, displayId: d, out: `hold ${sentH} 帧（${h.bufs.length - 2} 个 MOVE @60Hz, ${h.totalMs}ms）`, changed: null };
+  } else if (kind === 'multitouch') {
+    /*
+     * 双指手势：一根手指按住不动（摇杆），另一根滑动（转视角）。
+     *
+     * 游戏双手操作的基础 —— 现在只有单指，走位和转视角不能同时做。
+     */
+    const p1 = a.p1 || { nx: a.nx1, ny: a.ny1 };
+    const p2 = a.p2 || { nx: a.nx2, ny: a.ny2 };
+    const f = (q, kx, ky) => ({
+      x: q[kx] != null ? Number(q[kx]) * state.width : Number(q.x || 0),
+      y: q[ky] != null ? Number(q[ky]) * state.height : Number(q.y || 0),
+    });
+    const P1 = f(p1, 'nx', 'ny');
+    const P2 = f(p2, 'nx', 'ny');
+    const P2T = a.p2To ? f(a.p2To, 'nx', 'ny') : P2;
+    if (!Number.isFinite(P1.x) || !Number.isFinite(P2.x)) {
+      return { ok: false, hint: 'multitouch 需要 p1 和 p2 的坐标（nx/ny 或 x/y）' };
+    }
+    const inj = await import('./inject.js');
+    if (sendControlRaw() === null) {
+      return { ok: false, hint: 'multitouch 需要 scrcpy 控制通道（adb input 不支持多指）' };
+    }
+    const mt = inj.buildMultiTouch({
+      p1: P1, p2: P2, p2To: P2T,
+      screenW: state.width, screenH: state.height,
+      ms: Number(a.ms) || 600,
+      p1DriftX: Number(a.driftX) || 0,
+      p1DriftY: Number(a.driftY) || 0,
+      releaseP1: a.releaseP1 !== false,
+    });
+    let sent = 0;
+    for (let k = 0; k < mt.bufs.length; k += 1) {
+      if (!sendControl(mt.bufs[k])) break;
+      sent += 1;
+      if (k < mt.delays.length) await sleep(mt.delays[k]);
+    }
+    return { ok: sent > 0, displayId: d, out: `multitouch ${sent} 帧（双指 ${mt.totalMs}ms）`, changed: null };
   } else if (kind === 'swipe') {
     // **四个坐标都要映射，起点也不能漏。** 上一版起点读的是 a.x（用户给的是 x1），
     // 于是恒为 0；另外 y1/x2/y2 只乘比例没加 region 偏移。

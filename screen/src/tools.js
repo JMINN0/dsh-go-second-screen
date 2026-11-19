@@ -127,6 +127,8 @@ export async function input(args) {
   // vd.js:1568 早就实现了 kind==='hold'（60Hz 连续 MOVE，驱动游戏摇杆），
   // 但这里漏了它 → 模型传 hold 直接被拒，README 宣传的「60Hz 摇杆走路」
   // 只有命令行能用，模型完全够不着（对抗审查发现的）。
+  // **multitouch 暂时不在白名单**：代码保留但设备拒绝（Inconsistent event），
+  // 放进白名单会让模型去用然后失败找不到原因。见 tests/MULTITOUCH-FAILED.md。
   if (!['tap', 'swipe', 'hold', 'text', 'key', 'paste'].includes(kind)) {
     return { text: 'kind 只能是 tap / swipe / hold / text / key / paste。hold 是按住不动（游戏摇杆/长按/挖方块）。' };
   }

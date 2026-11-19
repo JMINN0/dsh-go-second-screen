@@ -886,9 +886,19 @@ export async function findImage(args) {
   if (!g.ok) return { text: g.hint };
 
   const V = await import('./vision.js');
+  // **默认多尺度。**
+  // 文档教的「vdisplay_shot 截图 → 裁出目标存 PNG」拿到的模板是 540 宽，
+  // 而 find_image 走 PNG 原生 720 —— 模板小 25%，单尺度匹配分数从 0.8 掉到 0.45
+  // 直接报「没找到」（实测：单尺度 0.454 找不到，多尺度 scale=1.3 得 0.796 找到）。
+  // 这不是优化，是让文档教的做法真能用。
+  const scales = Array.isArray(args?.scales) && args.scales.length
+    ? args.scales.map(Number).filter((x) => x > 0)
+    : [0.55, 0.65, 0.75, 0.85, 1.0, 1.15, 1.33, 1.5];
+  const thr = Number.isFinite(Number(args?.threshold)) ? Number(args.threshold) : 0.75;
   const r = await V.match(g.path, tpl, {
     region: args?.region || null,
-    threshold: args?.threshold === undefined ? 0.75 : Number(args.threshold),
+    threshold: thr,
+    scales,
   });
   if (!r.ok) return { text: `模板匹配失败：${r.hint}` };
 

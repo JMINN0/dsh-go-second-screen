@@ -141,40 +141,62 @@ def op_match(req):
             return (1.0 - mnv), mnloc
         return mxv, mxloc
 
-    # ① 1/4 金字塔粗搜
+    # **多尺度是刚需，不是优化。**
+    # 文档教用户「用 vdisplay_shot 截图，裁出目标存成 PNG」，
+    # 但 vdisplay_shot 默认 540 宽 JPEG，而 find_image 走 PNG 分支拿原生 720 —
+    # 模板是 0.75 倍，尺寸差 33%，单尺度 CCOEFF 直接掉到 0.4-0.6 → 报「没找到」。
+    # 这是用户最会踩的坑（对抗审查 S3）。
+    scales = req.get('scales') or [1.0]
+    best = (-1.0, 0, 0, 1.0)     # (score, x, y, scale)
     q = 4
     small = cv2.resize(img, (max(8, W // q), max(8, H // q)), interpolation=cv2.INTER_AREA)
-    stpl = cv2.resize(tpl, (max(4, tw // q), max(4, th // q)), interpolation=cv2.INTER_AREA)
-    best = (-1.0, 0, 0)
-    if stpl.shape[0] <= small.shape[0] and stpl.shape[1] <= small.shape[1]:
-        r = cv2.matchTemplate(small, stpl, method)
-        sc, loc = scoreOf(r)
-        best = (sc, loc[0] * q, loc[1] * q)
-    else:
-        # 模板太小，直接全分辨率
-        r = cv2.matchTemplate(img, tpl, method)
-        sc, loc = scoreOf(r)
-        best = (sc, loc[0], loc[1])
+    for sc_ratio in scales:
+        s2 = float(sc_ratio)
+        if s2 <= 0:
+            continue
+        t2 = tpl if abs(s2 - 1.0) < 1e-6 else cv2.resize(
+            tpl, (max(4, int(round(tw * s2))), max(4, int(round(th * s2)))),
+            interpolation=cv2.INTER_AREA)
+        t2h, t2w = t2.shape[:2]
+        if t2h > H or t2w > W:
+            continue
+        st2 = cv2.resize(t2, (max(4, t2w // q), max(4, t2h // q)), interpolation=cv2.INTER_AREA)
+        if st2.shape[0] <= small.shape[0] and st2.shape[1] <= small.shape[1]:
+            r = cv2.matchTemplate(small, st2, method)
+            sc, loc = scoreOf(r)
+            cand = (sc, loc[0] * q, loc[1] * q, s2)
+        else:
+            r = cv2.matchTemplate(img, t2, method)
+            sc, loc = scoreOf(r)
+            cand = (sc, loc[0], loc[1], s2)
+        if cand[0] > best[0]:
+            best = cand
 
-    # ② 在粗位置周围 ±16px 全分辨率精修
+    # ② 在粗位置周围 ±16px 全分辨率精修（用最佳尺度对应的模板）
+    bestScale = best[3]
+    tpl = tpl if abs(bestScale - 1.0) < 1e-6 else cv2.resize(
+        tpl, (max(4, int(round(tw * bestScale))), max(4, int(round(th * bestScale)))),
+        interpolation=cv2.INTER_AREA)
+    th2, tw2 = tpl.shape[:2]
     cx, cy = int(best[1]), int(best[2])
     pad = 16
     x0, y0 = max(0, cx - pad), max(0, cy - pad)
-    x1, y1 = min(W, cx + tw + pad), min(H, cy + th + pad)
+    x1, y1 = min(W, cx + tw2 + pad), min(H, cy + th2 + pad)
     roi = img[y0:y1, x0:x1]
-    if roi.shape[0] >= th and roi.shape[1] >= tw:
+    if roi.shape[0] >= th2 and roi.shape[1] >= tw2:
         r2 = cv2.matchTemplate(roi, tpl, method)
         sc2, loc2 = scoreOf(r2)
         score, fx, fy = sc2, x0 + loc2[0], y0 + loc2[1]
     else:
-        score, fx, fy = best
+        score, fx, fy = best[0], best[1], best[2]
 
     found = score >= thr
     return {
         'ok': True, 'found': bool(found), 'score': round(float(score), 4),
-        'x': int(fx + ox), 'y': int(fy + oy), 'w': int(tw), 'h': int(th),
-        'cx': round((fx + ox + tw / 2.0) / W0, 4),
-        'cy': round((fy + oy + th / 2.0) / H0, 4),
+        'x': int(fx + ox), 'y': int(fy + oy), 'w': int(tw2), 'h': int(th2),
+        'cx': round((fx + ox + tw2 / 2.0) / W0, 4),
+        'cy': round((fy + oy + th2 / 2.0) / H0, 4),
+        'scale': round(float(bestScale), 3),
         'threshold': thr,
         'method': 'SQDIFF' if lowVar else 'CCOEFF',
         'tplStd': round(tplStd, 1),

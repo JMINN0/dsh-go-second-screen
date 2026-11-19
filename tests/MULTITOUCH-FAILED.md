@@ -1,24 +1,45 @@
 # 多点触控：从失败到成功 —— 完整记录
 
 > **2026-11-19 晚更新：已修复。** 下面保留失败过程，因为根因很有价值。
->
-> **根因（反编译 scrcpy classes.dex 得到）**：
-> scrcpy 服务端自己算 pointer index 并 OR 上 ACTION_POINTER_DOWN(5)/UP(6)：
-> usage: smali [-v] [-h] [<command [<args>]]
 
-Options:
-  -h,-?,--help - Show usage information
-  -v,--version - Print the version of baksmali and then exit
+## 根因（反编译 scrcpy 的 classes.dex 得到）
 
-Commands:
-  assemble(ass,as,a) - Assembles smali files into a dex file.
-  help(h) - Shows usage information
+用 baksmali 反编译 `screen/assets/scrcpy-server.jar` 里的 `classes.dex`，
+在 `com/genymobile/scrcpy/control/Controller.smali` 里看到真相：
 
-See smali help <command> for more information about a specific command
-> **我们只要发基础 action(0=DOWN/1=UP/2=MOVE)，不要自己编码 index。**
-> 之前发 ， 截成 5，scrcpy 收到不认识的值 → Inconsistent event。
->
-> **修复后实测**：双指 76 帧发出，、，App 在前台时正常投递。
+```
+:cond_8c                        # action == UP 且还有其他指针
+    shl-int/lit8 v1, v10, 0x8   #   action = (pointerIndex << 8)
+    or-int/lit8  v1, v1, 0x6    #   action |= 6   ACTION_POINTER_UP
+
+:cond_93                        # action == DOWN 且还有其他指针
+    shl-int/lit8 v1, v10, 0x8   #   action = (pointerIndex << 8)
+    or-int/lit8  v1, v1, 0x5    #   action |= 5   ACTION_POINTER_DOWN
+```
+
+**scrcpy 服务端自己算 pointer index，并 OR 上 ACTION_POINTER_DOWN/UP。**
+我们只要发基础 action（0=DOWN / 1=UP / 2=MOVE），不要自己编码 index。
+
+## 之前为什么失败
+
+第一版按 Android 的约定把 index 编进 action 高 8 位：`5 | (1 << 8) = 261`。
+但 scrcpy 协议里 action 只有 1 字节，`261 & 0xff = 5` —— **index 被截掉**，
+scrcpy 收到 5（它不处理这个值，它自己会生成）→ 事件自相矛盾 → 被丢。
+
+## 修复后实测
+
+```
+双指 600ms → 76 帧
+Inconsistent event: 0    （之前每次都有）
+Dropping event:     0    （之前 4 次）
+窗口：com.android.settings/.Settings 在前台
+```
+
+## 教训
+
+我当时把失败归给「平台限制」，但**能回答这个问题的物证（scrcpy 自己的字节码）
+一直躺在仓库里**（`screen/assets/scrcpy-server.jar`）。
+`baksmali d classes.dex` 两条指令就给出了答案。
 
 ---
 

@@ -1027,6 +1027,174 @@ export async function probeScreen(args) {
   };
 }
 
+
+/**
+ * 按颜色找色块（颜色阈值 + 连通域）。
+ *
+ * ## 能干什么
+ *
+ * 找**固定颜色**的东西：血条（红/绿）、按钮底色、选中状态的边框、
+ * 小地图上的敌我点、进度条、生命值/魔法值条。
+ *
+ * **和模板匹配的分工**：
+ *   模板匹配 → 形状固定但颜色会变的（图标）
+ *   颜色检测 → 颜色固定但位置会变的（血条长度、小地图点位）
+ *
+ * ## 为什么必须用 Lab
+ *
+ * 实测踩过：用绝对 RGB 阈值，HDR 内容/不同色温下全部失效。
+ * Lab 的 a/b 通道描述的是「色相」，和亮度解耦，色偏时仍然稳。
+ *
+ * 耗时：6.8ms（实测，tests/CV-BENCHMARK-ARM.md）。
+ */
+export async function findColor(args) {
+  const tgt = args?.color;
+  if (!tgt) {
+    return {
+      text: '要给目标颜色。两种写法：\n'
+        + '  {r:200,g:50,b:50}   RGB（会自动转 Lab）\n'
+        + '  {l:128,a:180,b:150} 直接给 Lab\n'
+        + '先用 vdisplay_shot 看一眼，从图上取色。',
+    };
+  }
+
+  const g = await grabFullPng();
+  if (!g.ok) return { text: g.hint };
+
+  const V = await import('./vision.js');
+  const r = await V.color(g.path, tgt, {
+    tolerance: args?.tolerance === undefined ? 20 : Number(args.tolerance),
+    minArea: args?.minArea === undefined ? 200 : Number(args.minArea),
+    max: args?.max === undefined ? 10 : Number(args.max),
+    region: args?.region || null,
+  });
+  if (!r.ok) return { text: `颜色检测失败：${r.hint}` };
+
+  if (!r.count) {
+    return {
+      text: `没找到该颜色的色块（容差 ${args?.tolerance ?? 20}）。\n`
+        + '可以试：① 调大 tolerance（30-50）② 调小 minArea（50-100）③ 确认颜色值取对了',
+      count: 0,
+    };
+  }
+
+  const lines = [`找到 ${r.count} 个色块（耗时 ${r.elapsedMs}ms）：`];
+  r.boxes.slice(0, 8).forEach((b, i) => {
+    lines.push(`  ${i + 1}. 位置 (${b.x},${b.y}) 大小 ${b.w}×${b.h} 面积 ${b.area}`
+      + ` → 中心 nx=${b.cx} ny=${b.cy}`);
+  });
+  if (r.count > 8) lines.push(`  …还有 ${r.count - 8} 个`);
+  lines.push('', '最大的那个通常是目标（比如血条）。要点它用坐标或 vdisplay_input。');
+  return { text: lines.join('\n'), count: r.count, boxes: r.boxes, biggest: r.boxes[0] };
+}
+
+/** 找颜色并点最大的那个色块。 */
+export async function tapColor(args) {
+  const r = await findColor(args);
+  if (!r.count) return r;
+  const b = r.biggest;
+  const t = await input({ kind: 'tap', nx: b.cx, ny: b.cy, verify: false });
+  const ok = !/失败|不允许/.test(String(t.text || ''));
+  return {
+    text: `${ok ? '✅ 已点击最大色块' : '⚠️ 注入可能失败'}（${b.w}×${b.h}，中心 nx=${b.cx} ny=${b.cy}）`,
+    clicked: ok, nx: b.cx, ny: b.cy,
+  };
+}
+
+/**
+ * 自动判断当前界面该用什么识别方法，并给出建议顺序。
+ *
+ * ## 为什么需要
+ *
+ * 现在工具多了（OCR / 模板 / 颜色 / 指纹 / 差分），模型不知道该用哪个。
+ * 这个工具**先量再选**，把「用哪个」变成数据驱动的决定，不是猜。
+ *
+ * ## 判据（都来自实测数据）
+ *
+ * | 界面特征 | 推荐方法 | 依据 |
+ * |---|---|---|
+ * | 边缘密度 5-18% + 对比够 | **模板匹配** | 5.7ms，形状清晰 |
+ * | 颜色 top5 占比 >35% + 色数 <260 | **颜色检测** | 6.8ms，色块集中 |
+ * | 文字多（跑一次 OCR 探）| **OCR / find_text** | 唯一能读文字的 |
+ * | 画面接近空白 | **先怀疑 FLAG_SECURE 或没加载完** | std < 3 |
+ *
+ * ## 结果会缓存
+ *
+ * 同一个界面（用 dHash 判断）第二次问直接返回缓存，省掉探测的 100ms。
+ */
+export async function chooseMethod(args) {
+  const { readFile, writeFile, mkdir } = await import('node:fs/promises');
+  const { homedir } = await import('node:os');
+  const { join } = await import('node:path');
+  const cacheDir = join(homedir(), '.dsh', 'plugin-screen');
+  const cacheFile = join(cacheDir, 'method-cache.json');
+
+  const g = await grabFullPng();
+  if (!g.ok) return { text: g.hint };
+
+  const V = await import('./vision.js');
+  const fp = await V.dhash(g.path);
+  const pr = await V.probe(g.path);
+  if (!pr.ok) return { text: `探测失败：${pr.hint}` };
+
+  // 读缓存
+  let cache = {};
+  try { cache = JSON.parse(await readFile(cacheFile, 'utf8')); } catch { /* 没有缓存 */ }
+
+  const key = String(args?.key || 'default') + '|' + fp.hash;
+  const cached = cache[key];
+  if (cached && !args?.fresh) {
+    return {
+      text: [
+        `✅ 这个界面见过（指纹 ${fp.hash}），直接用上次的结论：`,
+        '',
+        ...cached.methods.map((m, i) => `  ${i + 1}. ${m.tool} —— ${m.why}`),
+        '',
+        `（要重新探测传 fresh:true）`,
+      ].join('\n'),
+      methods: cached.methods, cached: true,
+    };
+  }
+
+  // 打分
+  const methods = [];
+  if (pr.looksBlank) {
+    methods.push({ tool: 'vdisplay_probe_secure', why: '画面近空白，先确认是不是 FLAG_SECURE', score: 100 });
+  }
+  if (pr.canTemplate) {
+    methods.push({ tool: 'vdisplay_find_image', why: `边缘密度 ${(pr.edgeDensity * 100).toFixed(1)}%、对比 ${pr.contrast}，模板匹配 5.7ms 最划算`, score: 90 });
+  }
+  if (pr.canColor) {
+    methods.push({ tool: 'vdisplay_find_color', why: `颜色 top5 占比 ${(pr.colorTop5 * 100).toFixed(0)}%、色数 ${pr.colorCount}，色块集中适合颜色检测`, score: 85 });
+  }
+  methods.push({ tool: 'vdisplay_text', why: 'OCR 永远可用 —— 文字是唯一能「读懂内容」的路（1.9-3.3s）', score: 60 });
+  methods.push({ tool: 'vdisplay_fingerprint', why: '判断「还是不是同一屏」用指纹，7ms，不依赖内容', score: 50 });
+  methods.sort((a, b) => b.score - a.score);
+
+  // 写缓存
+  try {
+    await mkdir(cacheDir, { recursive: true });
+    cache[key] = { methods, at: Date.now(), stats: { edge: pr.edgeDensity, top5: pr.colorTop5, colors: pr.colorCount, contrast: pr.contrast } };
+    // 只留最近 100 条
+    const keys = Object.keys(cache);
+    if (keys.length > 100) for (const k of keys.slice(0, keys.length - 100)) delete cache[k];
+    await writeFile(cacheFile, JSON.stringify(cache));
+  } catch { /* 写不进去不影响 */ }
+
+  return {
+    text: [
+      `界面 ${pr.w}×${pr.h}，指纹 ${fp.hash}（新界面，已缓存）`,
+      `边缘密度 ${(pr.edgeDensity * 100).toFixed(1)}%　颜色 top5 ${(pr.colorTop5 * 100).toFixed(0)}%　色数 ${pr.colorCount}　对比 ${pr.contrast}`,
+      '',
+      '推荐的识别方法（按性价比）：',
+      ...methods.map((m, i) => `  ${i + 1}. ${m.tool}\n     ${m.why}`),
+      '',
+      '要点按优先用 vdisplay_tap_text（有文字）或 vdisplay_tap_image（有图标）。',
+    ].join('\n'),
+    methods, cached: false, fingerprint: fp.hash,
+  };
+}
+
 export async function userState() {
   const target = await adbTarget();
   const run = (cmd) => new Promise((resolve) => {

@@ -18,6 +18,7 @@ import {
   // 按文字找/点（2026-11-19）：消掉模型自己算坐标的 17.6% 点空率
   findTextSpec, tapTextSpec, keepAliveSpec,
   findImageSpec, tapImageSpec, fingerprintSpec, screenDiffSpec, probeScreenSpec,
+  findColorSpec, tapColorSpec, chooseMethodSpec,
 } from './tool-spec.js';
 import * as T from './tools.js';
 
@@ -117,6 +118,10 @@ export async function apply(ctx) {
               [fingerprintSpec, (a) => T.fingerprint(a)],
               [screenDiffSpec, (a) => T.screenDiff(a)],
               [probeScreenSpec, (a) => T.probeScreen(a)],
+              // 颜色检测 + 方法自动选择（2026-11-19）
+              [findColorSpec, (a) => T.findColor(a)],
+              [tapColorSpec, (a) => T.tapColor(a)],
+              [chooseMethodSpec, (a) => T.chooseMethod(a)],
           ];
           for (const [spec, exec] of defs) {
             try {

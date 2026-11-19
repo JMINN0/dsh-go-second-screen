@@ -755,3 +755,67 @@ export function probeScreenSpec() {
     output: out('边缘/颜色/亮度统计 + 方法建议。'),
   };
 }
+
+/** 按颜色找色块。 */
+export function findColorSpec() {
+  return {
+    name: 'vdisplay_find_color',
+    description: [
+      '按颜色找色块（颜色阈值 + 连通域）。找**固定颜色**的东西。',
+      '',
+      '适合：血条（红/绿）、按钮底色、选中边框、小地图上的敌我点、进度条、生命值/魔法值。',
+      '',
+      '**和模板匹配的分工**：模板找「形状固定但颜色会变」的（图标）；',
+      '颜色找「颜色固定但位置/长度会变」的（血条、点位）。',
+      '',
+      '内部用 Lab 的 a/b 通道而不是绝对 RGB —— 实测 HDR/色温偏移下 RGB 阈值会全失效。',
+      '耗时 6.8ms（实测）。',
+    ].join('\n'),
+    parameters: {
+      color: { type: 'object', additionalProperties: false, properties: { r: { type: 'integer', description: '红 0-255（给了 r/g/b 就不用 l/a/b）' }, g: { type: 'integer' }, b: { type: 'integer' }, l: { type: 'integer', description: 'Lab 亮度 0-255' }, a: { type: 'integer', description: 'Lab a 通道（绿-红）' }, b2: { type: 'integer' } }, required: true, description: '目标颜色。{r,g,b} 或 {l,a,b}' },
+      tolerance: { type: 'integer', description: 'Lab 空间容差，默认 20。找不到就调大（30-50）' },
+      minArea: { type: 'integer', description: '最小色块面积（像素），默认 200。小目标调小（50）' },
+      region: { type: 'object', additionalProperties: false, properties: { x: { type: 'integer' }, y: { type: 'integer' }, w: { type: 'integer' }, h: { type: 'integer' } }, description: '只在这块里找' },
+    },
+    output: out('找到几个色块、每个的位置和面积、最大的那个。'),
+  };
+}
+
+/** 找颜色并点最大色块。 */
+export function tapColorSpec() {
+  return {
+    name: 'vdisplay_tap_color',
+    description: '按颜色找到最大色块并点击它。适合点「纯色按钮」「纯色图标」。',
+    parameters: {
+      color: { type: 'object', additionalProperties: false, properties: { r: { type: 'integer' }, g: { type: 'integer' }, b: { type: 'integer' }, l: { type: 'integer' }, a: { type: 'integer' }, b2: { type: 'integer' } }, required: true, description: '目标颜色 {r,g,b} 或 {l,a,b}' },
+      tolerance: { type: 'integer', description: 'Lab 容差，默认 20' },
+      minArea: { type: 'integer', description: '最小面积，默认 200' },
+      region: { type: 'object', additionalProperties: false, properties: { x: { type: 'integer' }, y: { type: 'integer' }, w: { type: 'integer' }, h: { type: 'integer' } }, description: '只在这块里找' },
+    },
+    output: out('点到没、坐标、色块大小。'),
+  };
+}
+
+/** 自动判断该用什么识别方法。 */
+export function chooseMethodSpec() {
+  return {
+    name: 'vdisplay_choose_method',
+    description: [
+      '**第一次操作某个界面时先调这个** —— 它会量一下这个界面，告诉你该用什么识别方法。',
+      '',
+      '工具多了（OCR / 模板 / 颜色 / 指纹 / 差分），不知道该用哪个时用它。',
+      '它测三个东西并给出排序建议：',
+      '  · 边缘密度 5-18% + 对比够 → 模板匹配（5.7ms）',
+      '  · 颜色 top5 占比高 + 色数少 → 颜色检测（6.8ms）',
+      '  · 文字界面 → OCR（1.9-3.3s，唯一能读懂内容的）',
+      '',
+      '**结果会按界面指纹缓存** —— 同一个界面第二次问直接返回，省 100ms。',
+      '换界面（指纹变了）会重新探测。',
+    ].join('\n'),
+    parameters: {
+      key: { type: 'string', description: '缓存槽位名，默认 default。不同 App 用不同 key 互不干扰' },
+      fresh: { type: 'boolean', description: '强制重新探测，忽略缓存' },
+    },
+    output: out('界面统计 + 推荐的方法排序（含理由）。'),
+  };
+}

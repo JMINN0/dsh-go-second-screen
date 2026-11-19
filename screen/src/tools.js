@@ -1483,6 +1483,83 @@ export async function waitFor(args) {
   }
 }
 
+
+/* ═══════════════════════════════════════════════════════════════
+ * 用户事件（悬浮窗 → AI）
+ *
+ * 用户在悬浮窗上「拖到滑轨右端删除」某块后台屏时，overlay 会调
+ * framesrv 的 /event?type=user_deleted，写一行到
+ *   /data/local/tmp/dshframe/events.log
+ *
+ * 这里把它读出来，附在工具返回里 —— 这样 AI 就知道
+ * 「用户手动关了我的后台屏，可能是我影响了他操作」。
+ * ═══════════════════════════════════════════════════════════════ */
+
+const EVENTS_REMOTE = '/data/local/tmp/dshframe/events.log';
+const EVENTS_SEEN_FILE = 'user-events-seen.txt';
+let userEventsWarned = [];
+
+/** 读新出现的用户事件（只看上次之后的新条目）。 */
+export async function pollUserEvents() {
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const { readFile, writeFile, mkdir } = await import('node:fs/promises');
+    const { homedir } = await import('node:os');
+    const { join } = await import('node:path');
+    const run = promisify(execFile);
+    const target = await adbTarget();
+
+    const r = await run('adb', ['-s', target, 'shell', `cat ${EVENTS_REMOTE} 2>/dev/null`],
+      { timeout: 6000, maxBuffer: 1 << 20 }).catch(() => ({ stdout: '' }));
+    const raw = String(r.stdout || '').trim();
+    if (!raw) return [];
+
+    const dir = join(homedir(), '.dsh', 'plugin-screen');
+    const seenPath = join(dir, EVENTS_SEEN_FILE);
+    let lastSeen = 0;
+    try { lastSeen = Number(await readFile(seenPath, 'utf8')) || 0; } catch { /* 第一次 */ }
+
+    const fresh = [];
+    let maxTs = lastSeen;
+    for (const lineText of raw.split('\n')) {
+      const parts = lineText.split('|');
+      if (parts.length < 3) continue;
+      const ts = Number(parts[0]) || 0;
+      if (ts <= lastSeen) continue;
+      if (ts > maxTs) maxTs = ts;
+      fresh.push({ ts, type: parts[1], displayId: parts[2] });
+    }
+    if (!fresh.length) return [];
+
+    try { await mkdir(dir, { recursive: true }); await writeFile(seenPath, String(maxTs)); } catch { /* ignore */ }
+    return fresh;
+  } catch {
+    return [];
+  }
+}
+
+/** 把用户事件格式化成给 AI 看的提示。 */
+export function formatUserEvents(events) {
+  if (!events || !events.length) return '';
+  const lines = [];
+  for (const e of events) {
+    if (e.type === 'user_deleted') {
+      lines.push(
+        `⚠️ **用户手动关闭了 displayId=${e.displayId} 的后台屏。**`,
+        '这通常意味着你的操作影响到了用户 —— 请先确认：',
+        '  · 是不是抢了他的前台/键盘？（用 screen_user_state 查）',
+        '  · 是不是那块屏上的 App 他被顶掉了？',
+        '  · 是不是悬浮窗挡住了他要点的地方？',
+        '**不要自动重建那块屏**，先问用户要不要继续。',
+      );
+    } else {
+      lines.push(`⚠️ 用户事件：${e.type}（displayId=${e.displayId}）`);
+    }
+  }
+  return lines.join('\n');
+}
+
 export async function userState() {
   const target = await adbTarget();
   const run = (cmd) => new Promise((resolve) => {
@@ -1512,6 +1589,13 @@ export async function userState() {
   if (dshFg) reasons.push('DSH Go 在前台（用户正在跟 AI 对话）');
   if (imeShown) reasons.push('输入法正在显示（用户可能在打字）');
 
+  // **先查有没有「用户手动关了后台屏」这类事件**
+  let evText = '';
+  try {
+    const evs = await pollUserEvents();
+    evText = formatUserEvents(evs);
+  } catch { /* ignore */ }
+
   const lines = [
     busey ? '🔴 用户正在用手机 —— 不要抢前台/抢键盘' : '🟢 用户没在用手机，可以操作',
     '',
@@ -1525,7 +1609,11 @@ export async function userState() {
       '  · 浏览器 CDP（web_*）—— 不抢焦点',
       '  · 或等用户停下来');
   }
-  return { text: lines.join('\n'), busy: busey, frontPkg, imeShown };
+  return {
+    text: (evText ? evText + '\n\n' : '') + lines.join('\n'),
+    busy: busey, frontPkg, imeShown,
+    userEvents: userEventsWarned,
+  };
 }
 
 /** 查某个包的风控等级（读 docs/risk.json）。 */

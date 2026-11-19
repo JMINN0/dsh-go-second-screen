@@ -33,7 +33,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -172,35 +174,66 @@ public class OverlayService extends Service {
      *
      * 算法：从上往下累加，一个字放不下就换列。
      */
+    /**
+     * 重排所有「自动定位」的窗口，**用碰撞检测保证绝对不重叠**。
+     *
+     * ## 为什么不用「累加高度」
+     *
+     * 上一版按顺序累加每个窗口高度排位置。问题：
+     * 用户拖过的窗口（autoPos=false）被跳过，但它仍占着屏幕，
+     * 后面的窗口照样往那儿放 → 重叠。实测出现 (-124,412) 这种跑出屏幕的坐标。
+     *
+     * ## 现在的做法
+     *
+     * 1. 先把「用户手动摆过」的窗口当成障碍物收进 placed
+     * 2. 自动窗口逐个扫描屏幕，找第一个不和任何障碍物相交的位置
+     * 3. 整屏都放不下就缩小到 70% 再试，再不行就叠在角落（极端情况）
+     */
     private void relayoutAuto() {
         int screenW = getResources().getDisplayMetrics().widthPixels;
         int screenH = getResources().getDisplayMetrics().heightPixels;
-        int startX = dp(12);
-        int startY = dp(120);
-        int gap = dp(10);
-        int colW = 0;          // 当前列已用宽度（该列最宽的窗口）
-        int x = startX, y = startY;
+
+        List<Rect> placed = new ArrayList<>();
+        // 手动摆过的窗口当障碍
+        for (Win w : wins.values()) {
+            if (w.autoPos || w.root == null || w.lp == null) continue;
+            int ww = w.curW > 0 ? w.curW : Math.round(screenW * 0.46f);
+            int wh = w.curH > 0 ? w.curH : dp(200);
+            placed.add(new Rect(w.lp.x, w.lp.y, w.lp.x + ww, w.lp.y + wh));
+        }
 
         for (Win w : wins.values()) {
             if (!w.autoPos || w.root == null || w.lp == null) continue;
             int ww = w.curW > 0 ? w.curW : Math.round(screenW * 0.46f);
-            int wh = w.curH > 0 ? w.curH : dp(200);
-
-            // 当前列放不下了 → 换列
-            if (y + wh > screenH - dp(40) && y > startY) {
-                x = x + colW + gap;
-                y = startY;
-                colW = 0;
-            }
-            // 换列后还是放不下（窗口比屏还高）→ 从顶部强行放
-            if (y + wh > screenH - dp(40)) y = startY;
-
-            w.lp.x = x;
-            w.lp.y = y;
+            int wh = w.curH > 0 ? w.curH : Math.round(screenH * 0.3f);
+            int[] pos = findFreeSlot(placed, ww, wh, screenW, screenH);
+            w.lp.x = pos[0];
+            w.lp.y = pos[1];
             try { wm.updateViewLayout(w.root, w.lp); } catch (Throwable t) { /* ignore */ }
-            y += wh + gap;
-            if (ww > colW) colW = ww;
+            placed.add(new Rect(pos[0], pos[1], pos[0] + ww, pos[1] + wh));
         }
+    }
+
+    /**
+     * 在屏幕上找一块不和 placed 相交的空位。
+     * 从左上往下扫，步长 dp(16)（足够细，不会漏掉能放的地方但不至于太慢）。
+     */
+    private int[] findFreeSlot(List<Rect> placed, int ww, int wh, int screenW, int screenH) {
+        int startX = dp(6), startY = dp(96), step = dp(16);
+        int limitX = screenW - ww - dp(6);
+        int limitY = screenH - wh - dp(16);
+        for (int y = startY; y <= limitY; y += step) {
+            for (int x = startX; x <= limitX; x += step) {
+                Rect r = new Rect(x, y, x + ww, y + wh);
+                boolean hit = false;
+                for (Rect o : placed) {
+                    if (Rect.intersects(r, o)) { hit = true; break; }
+                }
+                if (!hit) return new int[]{x, y};
+            }
+        }
+        // 放不下：退到左上角（宁可重叠也别跑到屏幕外）
+        return new int[]{dp(6), startY};
     }
 
     @Override
@@ -208,6 +241,115 @@ public class OverlayService extends Service {
         running = false;
         closeAll();
         super.onDestroy();
+    }
+
+    // ═══════════════════ 删除滑轨 ═══════════════════
+
+    /** 滑轨窗口（拖动时出现，把窗口拖进右下端 = 删除）。 */
+    private View railView;
+    private WindowManager.LayoutParams railLp;
+    private View railKnob;
+    private boolean railShown = false;
+
+    /** 滑轨的几何：底部一条横向跑道。 */
+    private int railY() { return getResources().getDisplayMetrics().heightPixels - dp(160); }
+    private int railLeft() { return dp(24); }
+    private int railRight() { return getResources().getDisplayMetrics().widthPixels - dp(24); }
+
+    /** 显示滑轨（拖动进入左下区域时调）。 */
+    private void showRail() {
+        if (railShown) return;
+        railShown = true;
+        try {
+            if (railView == null) {
+                android.widget.FrameLayout fl = new android.widget.FrameLayout(this);
+                // 跑道底
+                GradientDrawable track = new GradientDrawable();
+                track.setColor(0xCC1A1A1A);
+                track.setCornerRadius(dp(24));
+                track.setStroke(dp(2), 0x66FFFFFF);
+                fl.setBackground(track);
+                fl.setPadding(dp(8), dp(8), dp(8), dp(8));
+                // 提示文字
+                TextView hint = new TextView(this);
+                hint.setText("拖到最右删除");
+                hint.setTextColor(0xAAFFFFFF);
+                hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+                android.widget.FrameLayout.LayoutParams hl =
+                        new android.widget.FrameLayout.LayoutParams(
+                                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+                hl.gravity = Gravity.CENTER;
+                fl.addView(hint, hl);
+                // 圆形手柄
+                railKnob = new View(this);
+                GradientDrawable kb = new GradientDrawable();
+                kb.setShape(GradientDrawable.OVAL);
+                kb.setColor(0xFFFF3B30);
+                railKnob.setBackground(kb);
+                android.widget.FrameLayout.LayoutParams kl =
+                        new android.widget.FrameLayout.LayoutParams(dp(44), dp(44));
+                kl.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
+                fl.addView(railKnob, kl);
+                railView = fl;
+
+                railLp = new WindowManager.LayoutParams(
+                        railRight() - railLeft(), dp(64),
+                        Build.VERSION.SDK_INT >= 26
+                                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                                : WindowManager.LayoutParams.TYPE_PHONE,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                        android.graphics.PixelFormat.TRANSLUCENT);
+                railLp.gravity = Gravity.TOP | Gravity.START;
+                railLp.x = railLeft();
+                railLp.y = railY();
+                wm.addView(railView, railLp);
+            } else {
+                wm.addView(railView, railLp);
+            }
+            Log.i(TAG, "滑轨已显示");
+        } catch (Throwable t) {
+            Log.e(TAG, "滑轨显示失败: " + t.getMessage());
+        }
+    }
+
+    /** 拖动时更新滑轨手柄位置（0..1）。 */
+    private void moveRailKnob(float frac) {
+        if (!railShown || railKnob == null) return;
+        try {
+            int span = railRight() - railLeft() - dp(60);
+            android.widget.FrameLayout.LayoutParams kl =
+                    (android.widget.FrameLayout.LayoutParams) railKnob.getLayoutParams();
+            kl.leftMargin = Math.round(Math.max(0f, Math.min(1f, frac)) * span);
+            railKnob.setLayoutParams(kl);
+        } catch (Throwable t) { /* ignore */ }
+    }
+
+    /** 隐藏滑轨。 */
+    private void hideRail() {
+        if (!railShown) return;
+        railShown = false;
+        try { if (railView != null) wm.removeView(railView); } catch (Throwable t) { /* ignore */ }
+    }
+
+    /** 通知 AI：用户手动关了后台屏。 */
+    private void notifyUserDeleted(int port) {
+        try {
+            final int p = port;
+            new Thread(new Runnable() {
+                public void run() {
+                    try {
+                        java.net.HttpURLConnection c = (java.net.HttpURLConnection)
+                                new java.net.URL("http://127.0.0.1:" + p + "/event?type=user_deleted").openConnection();
+                        c.setConnectTimeout(1200);
+                        c.setReadTimeout(1200);
+                        c.getResponseCode();
+                        c.disconnect();
+                    } catch (Throwable t) { /* 端口已经没了，正常 */ }
+                }
+            }).start();
+        } catch (Throwable t) { /* ignore */ }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -227,6 +369,7 @@ public class OverlayService extends Service {
         float aspect = 0.5f;
         float appliedAspect = -1f;
         boolean autoPos = true;   // 用户拖过就设 false，重排时不动它
+        float dragFrac = -1f;     // 拖动时在滑轨上的位置（0..1，-1=不在滑轨上）
         int curW = 0, curH = 0;   // 当前实际尺寸（relayoutAuto 要用）
         boolean collapsed = false;
         int userW = 0, userH = 0;
@@ -318,11 +461,30 @@ public class OverlayService extends Service {
             tlp2.bottomMargin = dp(2);
             box.addView(label, tlp2);
 
-            // 右下缩放手柄
-            View handle = new View(OverlayService.this);
+            // **右下缩放手柄：画成斜向双箭头**，一眼就知道能拖大小
+            View handle = new View(OverlayService.this) {
+                @Override protected void onDraw(Canvas c) {
+                    super.onDraw(c);
+                    Paint p2 = new Paint(Paint.ANTI_ALIAS_FLAG);
+                    p2.setColor(0xEEFFFFFF);
+                    p2.setStrokeWidth(dp(2));
+                    p2.setStyle(Paint.Style.STROKE);
+                    p2.setStrokeCap(Paint.Cap.ROUND);
+                    float w = getWidth(), h = getHeight();
+                    float pad = dp(3), ar = dp(5);
+                    // 主对角线 ╱
+                    c.drawLine(pad, h - pad, w - pad, pad, p2);
+                    // 右上箭头
+                    c.drawLine(w - pad, pad, w - pad - ar, pad, p2);
+                    c.drawLine(w - pad, pad, w - pad, pad + ar, p2);
+                    // 左下箭头
+                    c.drawLine(pad, h - pad, pad + ar, h - pad, p2);
+                    c.drawLine(pad, h - pad, pad, h - pad - ar, p2);
+                }
+            };
             GradientDrawable hbg = new GradientDrawable();
-            hbg.setColor(0x88FFFFFF);
-            hbg.setCornerRadius(dp(4));
+            hbg.setColor(0x66000000);
+            hbg.setCornerRadius(dp(6));
             handle.setBackground(hbg);
             FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(dp(16), dp(16));
             hlp.gravity = Gravity.BOTTOM | Gravity.END;
@@ -355,8 +517,13 @@ public class OverlayService extends Service {
             int type = Build.VERSION.SDK_INT >= 26
                     ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                     : WindowManager.LayoutParams.TYPE_PHONE;
-            lp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, type,
+            // **建窗口时就给固定尺寸，不要 WRAP_CONTENT。**
+            // WRAP_CONTENT + FrameLayout(MATCH_PARENT img) + 还没帧 = 尺寸为 0，
+            // 窗口塌成一条线，而且碰撞检测拿不到真实尺寸 → 排位置会重叠。
+            int w0 = Math.round(getResources().getDisplayMetrics().widthPixels * 0.46f);
+            int h0 = Math.round(w0 * 1.6f);
+            curW = w0; curH = h0;
+            lp = new WindowManager.LayoutParams(w0, h0, type,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                     android.graphics.PixelFormat.TRANSLUCENT);
             lp.gravity = Gravity.TOP | Gravity.START;
@@ -382,16 +549,49 @@ public class OverlayService extends Service {
                             int dy = (int)(e.getRawY() - downY);
                             if (Math.abs(dx) > dp(6) || Math.abs(dy) > dp(6)) moved = true;
                             if (moved) {
-                                autoPos = false;   // **用户拖过 → 以后重排不动它**（否则下次加窗会跳回去）
+                                autoPos = false;   // 用户拖过 → 以后重排不动它
                                 lp.x = startX + dx; lp.y = startY + dy;
                                 try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
+
+                                // **拖到屏幕下半部 → 出现删除滑轨**
+                                int screenH = getResources().getDisplayMetrics().heightPixels;
+                                int screenW = getResources().getDisplayMetrics().widthPixels;
+                                if (e.getRawY() > screenH * 0.62f) {
+                                    showRail();
+                                    float frac = (e.getRawX() - railLeft())
+                                            / Math.max(1f, (railRight() - railLeft()));
+                                    moveRailKnob(frac);
+                                    dragFrac = frac;
+                                } else {
+                                    hideRail();
+                                    dragFrac = -1f;
+                                }
                             }
                             return true;
                         case MotionEvent.ACTION_UP:
-                            // **不再「短按收起」。**
-                            // 实机踩到：多窗口时用户/脚本碰到窗口，一律被当成短按 → 收起成小方块，
-                            // 而且标签变成只有端口号，看起来像「窗口塌了、画面乱七八糟」。
-                            // 收起只留「—」按钮这个明确入口。
+                            // **拖到滑轨最右端 = 删除这块屏**
+                            if (moved && dragFrac >= 0.82f) {
+                                hideRail();
+                                final int dp2 = port;
+                                Log.i(TAG, "用户拖到滑轨右端，删除 port=" + dp2);
+                                notifyUserDeleted(dp2);          // 通知 AI
+                                ui.post(new Runnable() {
+                                    public void run() {
+                                        // 关窗口 + 通知 Node 侧停这块屏的推流
+                                        try {
+                                            java.net.HttpURLConnection c = (java.net.HttpURLConnection)
+                                                    new java.net.URL("http://127.0.0.1:38820/stopdisplay")
+                                                            .openConnection();
+                                        } catch (Throwable t) { /* ignore */ }
+                                        removeWin(dp2);
+                                    }
+                                });
+                                return true;
+                            }
+                            hideRail();
+                            dragFrac = -1f;
+                            // 点一下（没拖动）→ 最小化/恢复
+                            if (!moved && System.currentTimeMillis() - downAt < 400) toggle();
                             return true;
                     }
                     return false;
@@ -400,7 +600,9 @@ public class OverlayService extends Service {
 
             try {
                 wm.addView(root, lp);
-                Log.i(TAG, "窗口已添加 port=" + port + " x=" + lp.x + " y=" + lp.y);
+                Log.i(TAG, "窗口已添加 port=" + port + " " + lp.width + "x" + lp.height + " x=" + lp.x + " y=" + lp.y);
+                // **加完立刻重排**：这时所有窗口都已有固定尺寸，碰撞检测才算得准
+                ui.post(new Runnable() { public void run() { relayoutAuto(); } });
             } catch (Exception e) {
                 Log.e(TAG, "加窗口失败 port=" + port + ": " + e.getMessage());
             }
@@ -408,7 +610,22 @@ public class OverlayService extends Service {
 
         void toggle() {
             collapsed = !collapsed;
-            if (img != null) img.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+            // **最小化时不隐藏画面** —— 用户要的是「很小的实时画面标识」，
+            // 不是空白小方块。所以只改窗口尺寸，img 继续 MATCH_PARENT 刷新。
+            if (img != null) img.setVisibility(View.VISIBLE);
+            if (collapsed) {
+                // 缩成 76dp 宽的小预览
+                int smallW = dp(76);
+                int smallH = Math.round(smallW / Math.max(0.2f, Math.min(5f, aspect)));
+                if (smallH < dp(48)) smallH = dp(48);
+                if (smallH > dp(120)) smallH = dp(120);
+                if (lp != null) {
+                    lp.width = smallW; lp.height = smallH;
+                    try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
+                }
+                if (label != null) label.setText("屏 " + port);
+                return;
+            }
             if (label != null) {
                 // **始终显示「屏 N」**：只显示数字会被误认为窗口坏了
                 label.setText("屏 " + port);

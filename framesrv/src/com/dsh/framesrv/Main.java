@@ -89,6 +89,9 @@ public class Main {
     static volatile long markAt = 0;
     static volatile long lastCheckAt = 0;
     static final int IDLE_PAUSE_MS = 15_000;   // 15 秒没人取 → 暂停编码
+    /** 用户事件日志（悬浮窗写、插件读）：路径固定，双方约定。 */
+    static final String EVENTS_FILE = "/data/local/tmp/dshframe/events.log";
+
     static final int IDLE_EXIT_MS = 120_000;   // 120 秒彻底没人 → 自己退出
 
     /**
@@ -438,6 +441,30 @@ public class Main {
                     out.write(("--dshframe\r\nContent-Type: image/jpeg\r\nContent-Length: "
                             + j.length + "\r\n\r\n").getBytes());
                     out.write(j); out.write("\r\n".getBytes()); out.flush();
+                }
+            } else if (path.startsWith("/event")) {
+                // **用户事件上报**：悬浮窗删掉某块屏时调这里，
+                // 写一行到 events.log，插件侧读它就知道「用户手动关了后台屏」。
+                try {
+                    String type = "unknown";
+                    int q = path.indexOf("type=");
+                    if (q >= 0) {
+                        int e2 = path.indexOf('&', q);
+                        type = e2 > 0 ? path.substring(q + 5, e2) : path.substring(q + 5);
+                    }
+                    String evLine = System.currentTimeMillis() + "|" + type + "|" + displayId + "\n";
+                    java.io.FileOutputStream fo = new java.io.FileOutputStream(EVENTS_FILE, true);
+                    fo.write(evLine.getBytes("UTF-8"));
+                    fo.close();
+                    byte[] okb = "ok".getBytes("UTF-8");
+                    out.write(("HTTP/1.1 200 OK\r\nContent-Length: " + okb.length + "\r\n\r\n").getBytes("UTF-8"));
+                    out.write(okb);
+                    out.flush();
+                } catch (Throwable t) {
+                    try {
+                        out.write("HTTP/1.1 500 ERR\r\nContent-Length: 0\r\n\r\n".getBytes("UTF-8"));
+                        out.flush();
+                    } catch (Throwable t2) { }
                 }
             } else if (path.startsWith("/mark")) {
                 // /mark?nx=0.5&ny=0.3  → 记下点击位置，下一帧画十字

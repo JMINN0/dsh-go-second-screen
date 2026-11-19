@@ -279,8 +279,13 @@ public class OverlayService extends Service {
 
             img = new ImageView(OverlayService.this);
             img.setScaleType(ImageView.ScaleType.FIT_XY);
-            box.addView(img, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            // **给一个初始占位尺寸。**
+            // 原来 WRAP_CONTENT + 没有 bitmap = 宽高 0，
+            // 帧还没到时整个窗口只剩「✕ — 端口」一条细线，
+            // 用户看到的就是「窗口塌了」。
+            int phW = Math.round(getResources().getDisplayMetrics().widthPixels * 0.46f);
+            img.setLayoutParams(new LinearLayout.LayoutParams(phW, Math.round(phW * 2.2f)));
+            box.addView(img, new LinearLayout.LayoutParams(phW, Math.round(phW * 2.2f)));
 
             label = new TextView(OverlayService.this);
             label.setTextColor(Color.WHITE);
@@ -358,7 +363,10 @@ public class OverlayService extends Service {
                             }
                             return true;
                         case MotionEvent.ACTION_UP:
-                            if (!moved && System.currentTimeMillis() - downAt < 400) toggle();
+                            // **不再「短按收起」。**
+                            // 实机踩到：多窗口时用户/脚本碰到窗口，一律被当成短按 → 收起成小方块，
+                            // 而且标签变成只有端口号，看起来像「窗口塌了、画面乱七八糟」。
+                            // 收起只留「—」按钮这个明确入口。
                             return true;
                     }
                     return false;
@@ -377,7 +385,8 @@ public class OverlayService extends Service {
             collapsed = !collapsed;
             if (img != null) img.setVisibility(collapsed ? View.GONE : View.VISIBLE);
             if (label != null) {
-                label.setText(collapsed ? String.valueOf(port) : ("屏 " + port));
+                // **始终显示「屏 N」**：只显示数字会被误认为窗口坏了
+                label.setText("屏 " + port);
                 label.setTextSize(TypedValue.COMPLEX_UNIT_SP, collapsed ? 11 : 10);
             }
             if (!collapsed) { appliedAspect = -1f; applyAspect(); }

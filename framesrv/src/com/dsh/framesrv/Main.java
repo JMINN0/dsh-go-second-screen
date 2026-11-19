@@ -91,6 +91,34 @@ public class Main {
     static final int IDLE_PAUSE_MS = 15_000;   // 15 秒没人取 → 暂停编码
     static final int IDLE_EXIT_MS = 120_000;   // 120 秒彻底没人 → 自己退出
 
+    /**
+     * **目标屏还在吗？**
+     *
+     * 实机踩到：虚拟屏死了（建它的进程退出），framesrv 还以为活着，
+     * 继续吐最后一帧 → 悬浮窗显示「冻结的旧画面」，用户看到的就是
+     * 「一个显示不使用时的最后一个 app」。
+     *
+     * 所以每次 /status 和被看时都查一下，屏没了就自己退。
+     */
+    static boolean displayAlive() {
+        try {
+            // app_process 里没有 Context，只能走 ServiceManager 拿 IDisplayManager
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            Object dms = sm.getMethod("getService", String.class).invoke(null, "display");
+            if (dms == null) return true;   // 查不到就不擅自杀
+            Class<?> stub = Class.forName("android.hardware.display.IDisplayManager$Stub");
+            Object idm = stub.getMethod("asInterface", Class.forName("android.os.IBinder")).invoke(null, dms);
+            // getDisplayInfo(int) 不存在就直接用 exists 判据：调 getDisplayIds()
+            Object ids = idm.getClass().getMethod("getDisplayIds").invoke(idm);
+            int[] arr = (int[]) ids;
+            if (arr == null) return true;
+            for (int x : arr) if (x == displayId) return true;
+            return false;
+        } catch (Throwable t) {
+            return true;   // 反射失败就当它活着，不误杀
+        }
+    }
+
     public static void main(String[] args) {
         for (String a : args) {
             if (a.startsWith("--display=")) displayId = Integer.parseInt(a.substring(10));
@@ -386,6 +414,12 @@ public class Main {
                 // → 悬浮窗自己 stopSelf 退出（实机玩 MC 时踩到的）。
                 boolean alive = !mjpegClients.isEmpty()
                         || (System.currentTimeMillis() - lastFetchAt) < IDLE_EXIT_MS;
+                // **屏没了就直接退出**，别再吐冻结的最后一帧
+                if (!displayAlive()) {
+                    System.out.println("DISPLAY_GONE display=" + displayId);
+                    try { Thread.sleep(100); } catch (Throwable t2) { }
+                    System.exit(0);
+                }
                 String j = "{\"running\":" + alive + ",\"frames\":" + frames.get()
                         + ",\"fps\":" + fps + ",\"width\":" + outWidth
                         + ",\"aspect\":" + ((double) srcW / srcH) + "}";

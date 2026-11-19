@@ -19,6 +19,7 @@ import {
   findTextSpec, tapTextSpec, keepAliveSpec,
   findImageSpec, tapImageSpec, fingerprintSpec, screenDiffSpec, probeScreenSpec,
   findColorSpec, tapColorSpec, chooseMethodSpec,
+  waitForSpec,
 } from './tool-spec.js';
 import * as T from './tools.js';
 
@@ -122,6 +123,8 @@ export async function apply(ctx) {
               [findColorSpec, (a) => T.findColor(a)],
               [tapColorSpec, (a) => T.tapColor(a)],
               [chooseMethodSpec, (a) => T.chooseMethod(a)],
+              // 条件等待（2026-11-19）：替代固定 sleep，每步省 1-2 秒
+              [waitForSpec, (a) => T.waitFor(a)],
           ];
           for (const [spec, exec] of defs) {
             try {

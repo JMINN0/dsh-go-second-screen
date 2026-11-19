@@ -823,3 +823,39 @@ export function chooseMethodSpec() {
     output: out('界面统计 + 推荐的方法排序（含理由）。'),
   };
 }
+
+/** 条件等待 —— 替代固定 sleep。 */
+export function waitForSpec() {
+  return {
+    name: 'vdisplay_wait_for',
+    description: [
+      '等某个条件成立，替代「固定等 2 秒再截图」。**这是省时间最多的一个工具。**',
+      '',
+      '实测对比：固定等 2 秒 + OCR 2-3 秒 = 每步 4-5 秒；',
+      '用 wait_for 的门控（先 7ms 指纹看画面变没变，变了才跑 OCR）= 多数 150-400ms。',
+      '',
+      '判据（从便宜到贵）：',
+      '  · stable             — 连续几次画面不变（转场结束，最便宜）',
+      '  · fingerprint_changes — 画面变了没（7ms）',
+      '  · diff_gt            — 变化超过阈值（2.3ms + 截图）',
+      '  · color_present      — 出现某个颜色（6.8ms）',
+      '  · text_appears/gone  — 文字出现/消失（OCR，慢但有 cheapFirst 门控）',
+      '',
+      '**所有「点完等页面加载」的地方都该用它**，不要写固定 sleep。',
+      '',
+      '失败时会告诉你了多久、轮询几次、跑了几次 OCR —— 便于判断是超时还是判据写错。',
+    ].join('\n'),
+    parameters: {
+      until: { type: 'string', required: true, description: 'text_appears | text_gone | fingerprint_changes | fingerprint_is | diff_gt | color_present | stable' },
+      text: { type: 'string', description: 'until=text_appears/text_gone 时要等的文字' },
+      hash: { type: 'string', description: 'until=fingerprint_is 时要比对的 16 位指纹（先用 vdisplay_fingerprint 拿）' },
+      color: { type: 'object', additionalProperties: false, properties: { r: { type: 'integer' }, g: { type: 'integer' }, b: { type: 'integer' } }, description: 'until=color_present 时等什么颜色 {r,g,b}' },
+      threshold: { type: 'number', description: 'until=diff_gt 的阈值（0-1），默认 0.15' },
+      timeoutMs: { type: 'integer', description: '最多等多少毫秒，默认 8000，上限 30000' },
+      pollMs: { type: 'integer', description: '轮询间隔，默认 150' },
+      cheapFirst: { type: 'boolean', description: '先用 7ms 指纹门控，画面没变就跳过 OCR。默认 true，别关' },
+      region: { type: 'object', additionalProperties: false, properties: { x: { type: 'integer' }, y: { type: 'integer' }, w: { type: 'integer' }, h: { type: 'integer' } }, description: '只在这块里找（主要给 color_present 用）' },
+    },
+    output: out('等到了没、等了多久、轮询几次、跑了几次 OCR。'),
+  };
+}

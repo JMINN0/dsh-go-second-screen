@@ -1268,6 +1268,126 @@ export async function chooseMethod(args) {
   };
 }
 
+
+/**
+ * 条件等待 —— 替代所有「固定等 2 秒再截图」。
+ *
+ * ## 为什么这是最高价值的一个
+ *
+ * 现在每个操作之后都是固定 sleep，然后截图。实测：
+ *   - 固定等 2 秒 + OCR 2-3 秒 = 每步 4-5 秒
+ *   - 门控等待（7ms 指纹先看变没变，变了才 OCR）= 多数 150-400ms
+ *
+ * `cheapFirst` 是核心：先用 7ms 的 dHash 判断画面变没变，
+ * **只有真变了才跑 OCR**。等待类操作的绝大多数时间都省在这里。
+ *
+ * ## 支持的判据
+ *
+ *   text_appears   —— 出现某段文字（OCR，慢但准）
+ *   text_gone      —— 某段文字消失
+ *   fingerprint_is —— 指纹等于某值（7ms，最快）
+ *   fingerprint_changes —— 指纹和开始时不同（7ms）
+ *   diff_gt        —— 画面变化超过阈值（2.3ms）
+ *   color_present  —— 出现某个颜色（6.8ms）
+ *   stable         —— 连续 N 次画面不变（转场结束）
+ */
+export async function waitFor(args) {
+  const until = String(args?.until || '').trim();
+  const timeoutMs = Math.min(30000, Math.max(200, Number(args?.timeoutMs) || 8000));
+  const pollMs = Math.min(2000, Math.max(50, Number(args?.pollMs) || 150));
+  const cheapFirst = args?.cheapFirst !== false;
+  const text = String(args?.text || '');
+  const t0 = Date.now();
+
+  const st = vd.getActive();
+  if (!st || !st.displayId) return { text: '虚拟屏没在运行。先 vdisplay_start。' };
+
+  const V = await import('./vision.js');
+  const grab = async () => {
+    const g = await grabFullPng();
+    if (!g.ok) return null;
+    return g.path;
+  };
+
+  // 基线指纹
+  let baseHash = null;
+  const p0 = await grab();
+  if (p0) baseHash = (await V.dhash(p0)).hash;
+
+  const targetHash = String(args?.hash || '') || null;
+  let stableCount = 0;
+  let lastHash = null;
+  let polls = 0;
+  let ocrRuns = 0;
+
+  while (Date.now() - t0 < timeoutMs) {
+    polls += 1;
+    const path = await grab();
+    if (!path) { await new Promise((r) => setTimeout(r, pollMs)); continue; }
+    const h = (await V.dhash(path)).hash;
+
+    // ── 便宜判据，先用 ──
+    if (until === 'fingerprint_is' && targetHash) {
+      if (h === targetHash) return ok('指纹已匹配');
+    } else if (until === 'fingerprint_changes') {
+      if (baseHash && h !== baseHash) return ok('画面已变化（指纹变了）');
+    } else if (until === 'stable') {
+      if (h === lastHash) { stableCount += 1; } else { stableCount = 0; lastHash = h; }
+      if (stableCount >= (Number(args?.stableTimes) || 2)) return ok('画面已稳定');
+    } else if (until === 'diff_gt') {
+      const d = await V.diff(path, path);   // 占位，下面用 baseHash 判
+      if (baseHash && h !== baseHash) {
+        const d2 = await V.diff(p0, path);
+        if (d2.ok && (d2.maxCell >= (Number(args?.threshold) || 0.15))) return ok(`变化 ${d2.maxCell} 超过阈值`);
+      }
+    } else if (until === 'color_present') {
+      const c = await V.color(path, args?.color || { r: 255, g: 0, b: 0 }, {
+        tolerance: Number(args?.tolerance) || 30,
+        minArea: Number(args?.minArea) || 300,
+        region: args?.region || null,
+      });
+      if (c.ok && c.count > 0) return ok(`找到 ${c.count} 个该颜色色块`);
+    } else if (until === 'text_appears' || until === 'text_gone') {
+      // **cheapFirst：画面没变就不跑 OCR**
+      // 这是省时间的关键 —— 等待期间画面多数时候是静止的。
+      const changed = baseHash && h !== baseHash;
+      if (cheapFirst && !changed && polls > 2) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        continue;
+      }
+      const ocr = await import('./ocr.js');
+      const rr = await ocr.recognize(path, { minConf: 0.4, maxLines: 200, hash: h });
+      if (!rr.ok) { await new Promise((r) => setTimeout(r, pollMs)); continue; }
+      ocrRuns += 1;
+      const hit = rr.lines.some((l) => String(l.text || '').includes(text));
+      if (until === 'text_appears' && hit) return ok(`「${text}」已出现`);
+      if (until === 'text_gone' && !hit && text) return ok(`「${text}」已消失`);
+      if (hit) baseHash = h;    // 已出现但等它消失时，把基线滑过去
+    } else {
+      return { text: `不认识的 until「${until}」。可用：text_appears / text_gone / fingerprint_is / fingerprint_changes / diff_gt / color_present / stable` };
+    }
+
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+
+  return {
+    text: `⏱ ${Math.round((Date.now() - t0) / 1000)} 秒内没等到「${until}」`
+      + (text ? `（${text}）` : '')
+      + `\n轮询 ${polls} 次，跑了 ${ocrRuns} 次 OCR`
+      + (cheapFirst ? '（cheapFirst 生效：画面没变就跳过 OCR）' : '')
+      + '\n可以：① 加长 timeoutMs ② 换判据 ③ 直接截图看看现在是什么',
+    ok: false, elapsedMs: Date.now() - t0, polls, ocrRuns,
+  };
+
+  function ok(why) {
+    return {
+      text: `✅ ${why}（等了 ${Date.now() - t0}ms，轮询 ${polls} 次`
+        + (ocrRuns ? `，OCR ${ocrRuns} 次` : '，没跑 OCR') + '）',
+      ok: true, elapsedMs: Date.now() - t0, polls, ocrRuns,
+    };
+  }
+}
+
 export async function userState() {
   const target = await adbTarget();
   const run = (cmd) => new Promise((resolve) => {

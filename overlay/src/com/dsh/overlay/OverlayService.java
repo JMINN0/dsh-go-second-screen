@@ -400,12 +400,17 @@ public class OverlayService extends Service {
         View root;
         ImageView img;
         TextView label;
+        LinearLayout bar;      // 顶栏（最小化时隐藏，否则按钮比小预览还宽，把窗口撑大）
+        View handle;           // 缩放手柄（同样要藏）
         WindowManager.LayoutParams lp;
 
         float aspect = 0.5f;
         float appliedAspect = -1f;
         boolean autoPos = true;   // 用户拖过就设 false，重排时不动它
         float dragFrac = -1f;     // 拖动时在滑轨上的位置（0..1，-1=不在滑轨上）
+        boolean resizeMoved = false;   // 缩放手柄是否已越过阈值
+        boolean statusTimerStarted = false;
+        int statusFails = 0;
         int curW = 0, curH = 0;   // 当前实际尺寸（relayoutAuto 要用）
         boolean collapsed = false;
         int userW = 0, userH = 0;
@@ -431,8 +436,9 @@ public class OverlayService extends Service {
             // 背景全透明：画面自己铺满，不留任何边框
             box.setBackgroundColor(0x00000000);
 
-            // 顶栏：✕ 关自己 / — 收起
+            // 顶栏：✕ 关自己 / — 收起（**存成字段**，最小化时才能隐藏）
             LinearLayout bar = new LinearLayout(OverlayService.this);
+            this.bar = bar;
             bar.setOrientation(LinearLayout.HORIZONTAL);
             bar.setGravity(Gravity.CENTER_VERTICAL);
             TextView closeBtn = new TextView(OverlayService.this);
@@ -526,6 +532,7 @@ public class OverlayService extends Service {
             hbg.setColor(0x66000000);
             hbg.setCornerRadius(dp(6));
             handle.setBackground(hbg);
+            this.handle = handle;   // 存字段，最小化时隐藏
             FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(dp(16), dp(16));
             hlp.gravity = Gravity.BOTTOM | Gravity.END;
             hlp.bottomMargin = dp(2);
@@ -540,12 +547,27 @@ public class OverlayService extends Service {
                             downX = e.getRawX(); downY = e.getRawY();
                             startW = img.getWidth() > 0 ? img.getWidth() : dp(150);
                             startH = img.getHeight() > 0 ? img.getHeight() : dp(150);
+                            resizeMoved = false;
                             return true;
                         case MotionEvent.ACTION_MOVE:
-                            int nw = Math.max(dp(80), startW + (int)(e.getRawX() - downX));
+                            // **必须真的拖了才缩放。**
+                            // 实机踩到：手柄被误触一下（dx≈0）就执行
+                            //   nw = max(dp(80), startW + 0)
+                            // 而 dp(80)=260 正好是下限 → 窗口瞬间缩到最小，
+                            // 用户看到的就是「窗口莫名其妙变很小、尺寸和别的窗不一样」。
+                            int mvx = (int)(e.getRawX() - downX);
+                            int mvy = (int)(e.getRawY() - downY);
+                            if (!resizeMoved && Math.abs(mvx) < dp(10) && Math.abs(mvy) < dp(10)) {
+                                return true;   // 还没到阈值，不缩
+                            }
+                            resizeMoved = true;
+                            int nw = Math.max(dp(120), startW + mvx);
                             userW = nw; userH = nw;
                             appliedAspect = -1f;
                             applyAspect();
+                            return true;
+                        case MotionEvent.ACTION_UP:
+                            resizeMoved = false;
                             return true;
                     }
                     return false;
@@ -607,7 +629,10 @@ public class OverlayService extends Service {
                                 // **拖到屏幕下半部 → 出现删除滑轨**
                                 int screenH = getResources().getDisplayMetrics().heightPixels;
                                 int screenW = getResources().getDisplayMetrics().widthPixels;
-                                if (e.getRawY() > screenH * 0.62f) {
+                                // **必须拖得够远才出滑轨**：
+                                // 用户正常滑动页面时手指扫过窗口，不该弹出删除滑轨
+                                boolean farEnough = (Math.abs(dx) > dp(40) || Math.abs(dy) > dp(40));
+                                if (farEnough && e.getRawY() > screenH * 0.62f) {
                                     showRail();
                                     float frac = (e.getRawX() - railLeft())
                                             / Math.max(1f, (railRight() - railLeft()));
@@ -675,11 +700,18 @@ public class OverlayService extends Service {
             // 不是空白小方块。所以只改窗口尺寸，img 继续 MATCH_PARENT 刷新。
             if (img != null) img.setVisibility(View.VISIBLE);
             if (collapsed) {
-                // 缩成 76dp 宽的小预览
-                int smallW = dp(76);
+                // **最小化要真的小。**
+                // 原来 dp(76) 在 3.42 密度下是 260px —— 用户实测「还是太大」。
+                // 改成 36dp（≈123px），并且高度按比例但限死在 36~64dp。
+                int smallW = dp(36);
                 int smallH = Math.round(smallW / Math.max(0.2f, Math.min(5f, aspect)));
-                if (smallH < dp(48)) smallH = dp(48);
-                if (smallH > dp(120)) smallH = dp(120);
+                if (smallH < dp(36)) smallH = dp(36);
+                if (smallH > dp(64)) smallH = dp(64);
+                // **工具栏必须藏起来**：两个 13sp 按钮的宽度远超 36dp，
+                // 不藏的话 FrameLayout 会把窗口撑回大尺寸，用户看到的就是「最小化还是太大」。
+                if (bar != null) bar.setVisibility(View.GONE);
+                if (label != null) label.setVisibility(View.GONE);
+                if (handle != null) handle.setVisibility(View.GONE);
                 if (lp != null) {
                     lp.width = smallW; lp.height = smallH;
                     clampPos(smallW, smallH);
@@ -694,6 +726,9 @@ public class OverlayService extends Service {
                 label.setTextSize(TypedValue.COMPLEX_UNIT_SP, collapsed ? 11 : 10);
             }
             if (!collapsed) {
+                if (bar != null) bar.setVisibility(View.VISIBLE);
+                if (label != null) label.setVisibility(View.VISIBLE);
+                if (handle != null) handle.setVisibility(View.VISIBLE);
                 appliedAspect = -1f;
                 applyAspect();
                 clampPos(curW > 0 ? curW : dp(200), curH > 0 ? curH : dp(200));
@@ -743,9 +778,34 @@ public class OverlayService extends Service {
             }
         }
 
+        /**
+         * **独立的状态定时器**：不依赖「收到帧」才查 /status。
+         *
+         * 对抗审查 #5：原来 pollStatus() 只在 readMjpeg() 收到帧后调用，
+         * 于是「端口死了 / 那块屏没 App / 已经 stop」的窗口**永远不会关**，
+         * 留下一个永久空白窗，还会吞触摸事件。
+         */
+        void startStatusTimer() {
+            if (statusTimerStarted) return;
+            statusTimerStarted = true;
+            final Runnable tick = new Runnable() {
+                public void run() {
+                    if (!alive || !running) return;
+                    new Thread(new Runnable() {
+                        public void run() {
+                            if (!pollStatus()) return;   // 返回 false = 已决定关闭
+                        }
+                    }).start();
+                    ui.postDelayed(this, 3000);
+                }
+            };
+            ui.postDelayed(tick, 3000);
+        }
+
         /** 起轮询线程（幂等）。 */
         void startLoop() {
             if (looping || !alive) return;
+            startStatusTimer();
             looping = true;
             new Thread(new Runnable() {
                 @Override public void run() {
@@ -885,7 +945,16 @@ public class OverlayService extends Service {
         boolean pollStatus() {
             try {
                 String st = http("http://127.0.0.1:" + port + "/status");
-                if (st == null) return true;                     // 查不到，别急着自己关
+                if (st == null) {
+                    // **连续 5 次（15 秒）都连不上 = 端口真的没了** → 关窗
+                    if (++statusFails >= 20) {
+                        Log.i(TAG, "端口 " + port + " 连续 " + statusFails + " 次不通，关闭窗口");
+                        ui.post(new Runnable() { public void run() { removeWin(port); } });
+                        return false;
+                    }
+                    return true;
+                }
+                statusFails = 0;
                 if (st.contains("\"running\":false")) {
                     ui.post(new Runnable() { public void run() { removeWin(port); } });
                     return false;
@@ -938,6 +1007,7 @@ public class OverlayService extends Service {
             while ((n = in.read(b)) > 0) o.write(b, 0, n);
             return new String(o.toByteArray(), "UTF-8");
         } catch (Throwable t) {
+            Log.w(TAG, "http 失败 " + u + " : " + t.getClass().getSimpleName() + " " + t.getMessage());
             return null;
         } finally {
             try { if (c != null) c.disconnect(); } catch (Throwable t) { /* ignore */ }

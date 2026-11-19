@@ -104,7 +104,7 @@ y[0]=1115 = 0.7 × 1592
 
 可能的原因：`state.width/height` 是建屏时的初始声明（竖屏），
 App 强制横屏后实际是 1592×720，但 `state` 没更新 ——
-这正是 `refreshRealSize()` 要解决的事，但多指分支里没调它。
+这正是 `refreshRealSize()` 要解决的事，**误诊更正**：refreshRealSize() 在 input() 顶部无条件执行（不是多指分支漏调）。真实原因是它自己的 grep 匹配太脆，失败时静默保留竖屏旧值。
 
 ## 结论
 

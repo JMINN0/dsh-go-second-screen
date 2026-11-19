@@ -64,7 +64,7 @@ Minecraft 从零开始建世界 → 进游戏 → **用 60Hz 的虚拟摇杆驱�
 
 ### 视频识别：不用播放，直接读缓存
 
-视频画面在虚拟屏上抓不到（MediaCodec 只出首帧，四条修法全失败）。
+视频画面**能**抓（2026-11-17 两次实测推翻旧结论：scrcpy 12 秒新增 411 帧=34.3fps；screencap -d <SFID> 约 7fps；ImageReader 67-76fps）。
 **但绕开它更简单**：App 缓存的视频是标准 MP4，能直接 pull 出来 ffmpeg 读。
 
 ```bash

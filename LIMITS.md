@@ -215,7 +215,7 @@ raw getInt = 2
 
 - **现象**：想让手机冒充蓝牙鼠标去操作别的设备 —— 不行。
 - **根因**：Android 原生只做 HID Host，做 Device 要改蓝牙栈。
-- **证据**：【有依据】Android 蓝牙 HID 只提供 Host Profile。
+- **证据**：【有依据】**【理由不成立】** android-30.jar 里有 BluetoothHidDevice / HID_DEVICE 角色（API 28+ 公开接口）。20 分钟可判本机 ROM 支不支持：getProfileProxy(HID_DEVICE) 是否返回非 null。
 - **绕过**：无。
 
 ---

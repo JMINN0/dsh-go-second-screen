@@ -77,7 +77,7 @@ bash framesrv/build.sh     # 取帧服务 dex
 
 | 指标 | 数值 | 怎么测的 |
 |---|---|---|
-| 取帧速度 | 53-114 fps | framesrv `/status` 的 frames 增量 |
+| 取帧速度 | ImageReader 探针 67fps；framesrv 自报 76fps（单次采样）；MJPEG 出流 4 秒 179 帧 = 44.8fps | `tests/IMAGEREADER-PROBE.md`、`/status`、Node socket 计帧 |
 | MJPEG 帧间隔 | 中位 17ms，P90 33ms | Node socket 连 `/stream.mjpg` 记时间戳 |
 | screencap 对比 | ~143ms/次 | 同机实测 |
 | 单帧编码 | ~10-20ms | 400px 宽 JPEG q70 |

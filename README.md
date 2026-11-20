@@ -1,7 +1,7 @@
 # 后台屏 · 让 AI 操控安卓手机，但不抢你的屏幕
 
-**一句话**：这个项目给 AI 在安卓手机上开一块**你完全看不见的虚拟屏**（Android `VirtualDisplay`），
-AI 在那块屏上跑 App、点按钮、读文字、玩游戏，你的主屏、输入法、前台应用**一次都不被打断**。
+**一句话**：这个项目给 AI 在安卓手机上开一块**默认不画在物理屏幕上**的虚拟屏（Android `VirtualDisplay`），
+AI 在那块屏上跑 App、点按钮、读文字、玩游戏，而你的主屏、输入法、前台应用的**焦点不会被夺走**
 
 这件事解决的是「**AI 操控手机（computer use）时，人和 AI 抢同一块屏幕**」这个问题 ——
 现有的手机自动化方案（无障碍服务、scrcpy 投屏镜像、Appium / UI Automator）都必须占用你的屏幕，
@@ -106,9 +106,17 @@ VirtualDisplay
 **`mBaseDisplayInfo` / `mOverrideDisplayInfo` 那两段永远不带这两个标志**，拿它判断会误判成「不能托管」。
 `canHostTasks` 也不能当判据 —— 实测能正常投 App 的屏，它在 `mBaseDisplayInfo` 里是 `false`。
 
-> 关于标志位的细节，仓库里两处记录不完全一致（`LIMITS.md` A-02 列的 flags 里没有这两个），
-> 见文末「已知问题」最后一条。**【推断】** 两者描述的是不同的 flags 集合（设备 flags vs 虚拟屏 flags），
-> 但这一条我没能核对 AOSP 源码确认。
+  > **⚠️ 这里仓库内部有矛盾，不要当确定结论。**
+  >
+  > 上面这段「判据」来自 `screen/README.md`。但 `LIMITS.md` A-02 引用**同一行** `dumpsys display` 输出时，
+  > 记到的 flags 是 `FLAG_PRESENTATION, FLAG_TRUSTED, FLAG_OWN_DISPLAY_GROUP, FLAG_ALWAYS_UNLOCKED` ——
+  > **没有** `FLAG_OWN_CONTENT_ONLY` / `FLAG_OWN_FOCUS`。
+  >
+  > 两份记录引同一行输出却给出不同结论，**必有一处记错了**。我没能回溯是哪一条抄错，也没核对 AOSP 源码。
+  > **【不知道】**
+  >
+  > **判断能不能托管 App，以「能不能 `am start --display <id>` 成功」为准**，别依赖 flags 字符串。
+  > 若 `LIMITS.md` 那条为真，`vd.js` 里按 flags 判 `canHost` 的逻辑会恒 false，这条待查。
 
 ### 3.2 无 root 为什么可行：权限从 `uid 2000` 来
 
@@ -137,7 +145,8 @@ android.permission.ACCESS_SURFACE_FLINGER: granted=true
 **代价**：这条路的前提是 ADB 开着。所以 `adb_enabled=1` 这个特征消不掉，见 [LIMITS.md](LIMITS.md) A-01。
 换句话说，**没有 ADB 就没有「用户看不见的屏」** —— 这一条不是工程量问题，是权限模型决定的：
 
-- `MediaProjection.createVirtualDisplay()` 建出来的是**镜像接收端**（只能接主屏画面，不能在上面启动别的 App）
+- `MediaProjection.createVirtualDisplay()` 建出来的**大概率**是镜像接收端（只能接主屏画面，不能在上面启动 App）。
+  **这一条是【推断】，不是实测**：`LIMITS.md` D-04 明确写着「没试过」；我们只用它做过截图，没试过往上投 App。
 - `android.companion.virtual` 需要 `COMPANION_DEVICE_APP_STREAMING` role，**只有 OEM 能授给系统 App**
 
 ### 3.3 为什么屏会和进程一起消失（以及怎么解决）
@@ -809,7 +818,9 @@ AI 调 vdisplay_input { kind: "tap", nx: 0.5, ny: 0.9 }
 > 能查到的是：① 17ms 的帧间隔中位（就是上表那行，对应瞬时 59fps、4 秒均值 44.8fps）；
 > ② `53.7fps` —— 那是「没客户端时也在编码」那段时间的编码速率，是审计出来的**浪费**，不是交付帧率；
 > ③ `119fps` —— 那是**一个 bug 的读数**：虚拟屏已经死了、framesrv 还在对一片空白疯狂编码。
-> 写文档、做容量规划时不要用 114fps。`llms.txt` 里的那一行**还没改**，别引用它。
+> 写文档、做容量规划时不要用 114fps。`llms.txt` 里的那一行**已于 2026-11-20 改正**。
+>
+> **上表里带「4 秒」「179 帧」「17ms」这些数的原始输出，全部照抄在 [tests/MEASUREMENTS-2026-11-20.md](tests/MEASUREMENTS-2026-11-20.md)**，包括测量脚本和当时的命令。
 
 ### 9.2 感知与操作
 
@@ -863,7 +874,7 @@ AI 调 vdisplay_input { kind: "tap", nx: 0.5, ny: 0.9 }
 |---|---|---|
 | **打字只对部分 App 有效** | `input text` 在系统设置、标准输入框能用；京东这类自绘输入框注不进去 | 用 `kind: "paste"`（走剪贴板 + `KEYCODE_PASTE`），实测能粘进 `abc中文测试abc` |
 | **深链不可靠** | 小红书那次 2 次全被系统拦（`SecurityException: not exported`） | 深链只能碰运气，优先走正常启动 |
-| **坐标点击会静默失败** | 已加动作后画面校验（没变返回 `ok:false`） | **17.6% 这个数字的归因已改**：主因不是点不准，是模型不知道屏多大、坐标系对不上。`vdisplay_tap_text` 消掉了这一步。**修完之后的白点率是多少 →【不知道】，没有再测过** |
+| **坐标点击会静默失败** | 已加动作后画面校验（没变返回 `ok:false`） | **「17.6% 点空率」这个数字已作废**：唯一能查到的推导是 `vd.js` 里「15 张抽样有 5 张与上一张逐像素相同」= **约 33%**，不是 17.6%；而 `tests/CLICK-VERIFICATION.md` 的结论是「点击一直有效，失败来自验证信号本身」。修完之后的白点率 **【不知道】**，没有重测。`vdisplay_tap_text` 消掉了这一步。**修完之后的白点率是多少 →【不知道】，没有再测过** |
 | **验证信号会骗人** | 用「画面没变」判失败有三个坑：画面本来就在动（视频/秒表）→ 永远 true；屏进 doze → 永远 false；displayId 不匹配时 scrcpy 服务端**静默丢弃** | 看返回值，不要盲目重试同一坐标（重试会制造连点特征） |
 | **多屏并行被一把全局锁串行化** | 调度层并行，执行层串行（`input/shot/launch/text` 排同一条 mutex） | 「3 个 AI 同时操作 3 个 App 提速 3 倍」现在做不到 |
 | **OCR 缓存只有单槽** | A/B 界面交替时命中率归零 | 交替场景每次都重新识别 |
@@ -941,7 +952,7 @@ grep -i "apply failed" "$HOME/.dsh/dsh-app/diagnostics.md"
 | **窗口能被拖出屏幕** | clamp 只保证留 72dp，实测跑到 x=-227 完全不可达 | 改为至少一半可见 | — |
 | **轻触缩放手柄就缩到最小** | `max(dp(80), startW + 0)`，而 `dp(80)` 在 3.42 密度下 = 260px，正好是下限 | 加 10dp 移动阈值，下限提到 `dp(120)` | — |
 | **拖拽删除太容易误触** | 滑轨跟着窗口位置走，拖到右下角就删 | 改两段式：先拖到左下停靠区 → 吸附到滑块 → 再往右滑过 82% 才删 | 停在停靠区不删 |
-| **MJPEG 延迟大** | ① 采集线程里同步写 socket，客户端慢就堵住整条链路；② 两边都没设 `TCP_NODELAY`，每帧三次写被 Nagle 攒包 | 写操作移到独立线程（只保留最新帧，旧的丢弃）+ 两边 `setTcpNoDelay(true)` | 帧间隔中位 **17ms**、P90 33ms；帧率 53→**114fps** |
+| **MJPEG 延迟大** | ① 采集线程里同步写 socket，客户端慢就堵住整条链路；② 两边都没设 `TCP_NODELAY`，每帧三次写被 Nagle 攒包 | 写操作移到独立线程（只保留最新帧，旧的丢弃）+ 两边 `setTcpNoDelay(true)` | 改后用 Node 裸 socket 连 `/stream.mjpg` 计 4 秒：**179 帧 = 均值 44.8fps**，帧间隔**中位 17ms**、p90 33ms（见 §9.1）。**没有 114fps 这回事**，理由见 §9.1 的说明 |
 | **看不到 AI 点了哪里** | 原来画的是十字准星，在深色背景上看不清 | 改成**水滴波纹**：红色实心点 + 白描边 + 3 圈扩散圆环，900ms 淡出；静止画面时由动画线程连推 16 帧 | 中心区红色像素 2406→2677 递增 |
 | **重复 `am start` 起两个 overlay 进程** | `MainActivity` 没有 `launchMode` | 加 `singleTask` + 实现 `onNewIntent`（否则 `--ez stop` 会被静默丢弃） | 进程数恒为 1 |
 
@@ -959,7 +970,7 @@ grep -i "apply failed" "$HOME/.dsh/dsh-app/diagnostics.md"
 | **单步延迟** | 50–100ms（树读得快） | 143ms/帧 | 树读得快，注入慢 | 读约 1s；注入 <10ms，但工具层约 2s（5 次 dumpsys 往返） |
 | **能操作哪些 App** | 绝大多数（自绘控件可能缺节点） | 任意 | 主要是自己的 App / 调试版 | **任意**（包括 3D 游戏，需 HWC） |
 | **风控可检测的特征** | 无障碍开启状态（`enabled_accessibility_services` 可读） | 录屏/镜像本身 | 调试连接、`UiAutomation` | `adb_enabled=1`、虚拟屏（`dumpsys display` 可见）、注入的 `deviceId` |
-| **多 AI 并发** | 不能（一块屏） | 不能 | 串行 | **能**（多屏池 + 租约，同一 App 仍互斥） |
+| **多 AI 并发** | 不能（一块屏） | 不能 | 串行 | **能**（多屏池 + 租约。但租约是**协作式**的：`claim` 会拒绝第二个申请，`vdisplay_*` 工具本身**不校验**租约 —— 见 §10.1） |
 | **适合干什么** | 需要结构化节点的常规自动化 | 人工远程操作、演示 | 自家 App 的**自动化测试** | AI Agent 在后台跑第三方 App、挂机、多任务 |
 
 **几个必须说清楚的地方**：

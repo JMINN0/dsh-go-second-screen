@@ -529,7 +529,7 @@ MediaProjection 替代 screencap、多 AI broker 完整版、跨进程租约。
 
 | 工具 | 一句话 |
 |---|---|
-| `vdisplay_start` | 建一块私有虚拟屏，返回 displayId 与能力标志；支持 `orientation` / `hwc` |
+| `vdisplay_start` | 建一块私有虚拟屏，返回 displayId 与能力标志。**默认方形 1080×1080**（旋转不变，投任何 App 都不会横竖冲突）；`orientation` 可选 `square`/`landscape`/`portrait`，`hwc` 控制 3D 渲染 |
 | `vdisplay_status` | 屏在不在跑、displayId、上面跑着什么、主屏焦点是什么 |
 | `vdisplay_stop` | 销毁屏并释放 OCR/OpenCV 常驻助手（不关会留孤儿进程） |
 | `screen_keepalive` | 设定「AI 停下多久后自动关屏」，1–360 分钟（默认 5） |
@@ -662,8 +662,8 @@ MediaProjection 替代 screencap、多 AI broker 完整版、跨进程租约。
 ### 7.3 两块屏跑两个 App（多任务）
 
 ```
-1. screen_new { orientation: "portrait" }    → sd-1
-2. screen_new { orientation: "landscape" }   → sd-2
+1. screen_new { }                              → sd-1（默认方形 1080×1080）
+2. screen_new { orientation: "landscape" }    → sd-2（明确知道要横屏才指定）
 3. screen_use { screenId: "sd-1" }; vdisplay_launch { pkg: "com.tencent.mm" }
 4. screen_use { screenId: "sd-2" }; vdisplay_launch { pkg: "com.android.settings" }
 5. screen_pool {}                             → 两块都在，各有自己的推流

@@ -1,0 +1,97 @@
+# 安卓「后台屏」— 让 AI 在后台操作手机，不抢你的屏幕
+
+> 一块用户看不见的 Android 虚拟屏（VirtualDisplay）。AI 在这块屏上运行任意 App、点击、输入、截图，
+> 用户的物理主屏（Display 0）完全不受影响 —— 不抢前台、不抢键盘、不弹窗口。
+> 基于 scrcpy-server + app_process，ADB uid 2000 运行，**不需要 root**。
+
+## 这个项目解决什么问题
+
+AI 操控安卓手机的所有现有方案都共享同一个瓶颈：**屏幕是独占资源，人和 AI 不能同时用。**
+
+| 方案 | 为什么不够 |
+|---|---|
+| 无障碍服务（Accessibility） | 必须在前台，用户一碰手机就打断 AI；系统会显示"正在被控制" |
+| scrcpy 主屏镜像 | 镜像的就是主屏，AI 的操作直接显示在用户脸上，用户也动不了 |
+| Appium / UI Automator | 同样占用主屏，且需要 USB 或 root |
+| 云手机 / 模拟器 | 不是用户的真实设备，没有真机环境（设备指纹、已装 App、账号态） |
+
+**后台屏的思路**：不去抢那块屏，而是**另外造一块**。Android 的 VirtualDisplay 有独立的
+SurfaceFlinger 图层、独立的窗口栈、独立的输入焦点。物理屏和虚拟屏在系统层面就是对等但独立的两个显示设备。
+
+## 核心技术事实
+
+- **虚拟屏创建**：`scrcpy-server` 的 `new_display` 模式，或直接 `DisplayManager.createVirtualDisplay`
+- **无 root 为什么可行**：`app_process` 以 shell（uid 2000）身份运行，能拿到 `ADD_TRUSTED_DISPLAY`、
+  `INTERNAL_SYSTEM_WINDOW` 等签名级权限；这些权限通过 `app_process` 的 shell 身份继承
+- **取帧**：`ImageReader` 直接读虚拟屏 Surface（53-114fps），比 screencap（~143ms/次）快一个数量级
+- **输入注入**：scrcpy 控制通道 `INJECT_TOUCH_EVENT`，支持多点触控（action 必须发基础值 0/1/2，
+  索引由服务端自己移位拼接 —— 客户端自己编码会被截断）
+- **实时预览**：`TYPE_APPLICATION_OVERLAY` 悬浮窗 + MJPEG（帧间隔中位 17ms）
+- **点击可视化**：水滴波纹动画（扩散圆环 + 焦点圆点，900ms 淡出），画在 JPEG 帧里
+
+## 能做什么
+
+- AI 在后台跑任意 App（微信、淘宝、游戏、银行以外的都行），用户继续用主屏
+- 同时开多块后台屏，每块独立跑不同 App，各自有悬浮窗预览
+- 操作过程实时可见（悬浮窗），点击位置有波纹提示
+- 截屏、找文字（OCR）、模板匹配、点击、滑动、输入、长按
+- 浏览器通过 CDP 直接操控（不点屏幕，零打扰）
+
+## 不能做什么（重要）
+
+- **不能操作 `FLAG_SECURE` 的窗口**（银行、支付、部分视频 App）—— 截图全黑，这是 Android 硬边界
+- **不能给同一个 App 开两个实例**（`singleTask` 的限制），要开两个微信只能多用户
+- **不能完全拟人化**（`adb input` 注入的事件没有 MOVE、压力恒定），有风控的 App 需要真实输入
+- **不是 MCP server**，是 DSH Go 手机 App 的插件
+
+## 快速开始
+
+```bash
+# 1. 手机开启「无线调试」，配对后固定走回环
+adb pair <ip>:<port>          # 一次
+adb connect 127.0.0.1:5555
+adb tcpip 5555                # 之后 WiFi 断了也能用
+
+# 2. 克隆
+git clone https://github.com/JMINN0/dsh-go-second-screen.git
+cd dsh-go-second-screen
+
+# 3. 下载构建依赖（37MB，已在 gitignore 里所以不随仓库分发）
+bash tools/fetch-sdk.sh
+
+# 4. 构建
+bash overlay/build.sh      # 悬浮窗 APK
+bash framesrv/build.sh     # 取帧服务 dex
+```
+
+## 文档索引
+
+- [README.md](README.md) — 完整说明、原理、安装、工具清单、FAQ
+- [LIMITS.md](LIMITS.md) — 56 条做不到的事，按原因分类
+- [OPERATION-PRIORITY.md](OPERATION-PRIORITY.md) — 四档操作优先级（按打乱成本排）
+- [BROKER-DESIGN.md](BROKER-DESIGN.md) — 多 AI 多屏架构设计
+- [docs/OPERATION-PLAYBOOK.md](docs/OPERATION-PLAYBOOK.md) — 实战操作手册
+- [tests/risk-sim/FULL-REPORT.md](tests/risk-sim/FULL-REPORT.md) — 六个本地靶场的实测记录
+
+## 关键数字（实测）
+
+| 指标 | 数值 | 怎么测的 |
+|---|---|---|
+| 取帧速度 | 53-114 fps | framesrv `/status` 的 frames 增量 |
+| MJPEG 帧间隔 | 中位 17ms，P90 33ms | Node socket 连 `/stream.mjpg` 记时间戳 |
+| screencap 对比 | ~143ms/次 | 同机实测 |
+| 单帧编码 | ~10-20ms | 400px 宽 JPEG q70 |
+| OpenCV 模板匹配 | 5.7ms | 8 尺度金字塔，Pyramid + refine |
+
+## 适用人群
+
+- 想让 AI 挂机但不想被抢屏幕的人
+- 做安卓自动化测试、需要真机 + 不干扰开发者的团队
+- 研究 computer-use / phone-use agent 的研究者
+- 想要「AI 帮我操作手机」但担心它看到我的私密界面的人
+
+## 许可证与状态
+
+- 状态：**实验性（v0.1.0）**，核心链路已跑通，但有多项功能是半成品
+- 平台：Android 12+（实测 Android 16 / 红魔 NX809J）
+- 许可证：见 [LICENSE](LICENSE)

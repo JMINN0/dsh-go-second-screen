@@ -6,3 +6,29 @@ node_modules/
 *.bak2*
 *.bak-*
 *.bak.*
+
+# ═══════════════════════════════════════════════════════════
+# 构建依赖：不提交，用 tools/fetch-sdk.sh 下载
+#
+# 为什么：这两个 jar 一共 37MB，占了仓库 90% 的体积。
+# 陌生用户 clone 时要多下 37MB 才能看到一行代码，很劝退。
+# ═══════════════════════════════════════════════════════════
+tools/sdk/*.jar
+tools/sdk/*.zip
+
+# ═══════════════════════════════════════════════════════════
+# 构建产物：都能重新生成
+# ═══════════════════════════════════════════════════════════
+overlay/build/
+framesrv/build/
+*/build/*.apk
+*/build/*.dex
+*/build/*.zip
+*.aligned.apk
+*.signed.apk
+*.unsigned.apk
+overlay/ai-overlay.apk
+
+# 例外：运行时真正需要的（这些必须提交）
+!screen/assets/scrcpy-server.jar
+!screen/assets/injector/

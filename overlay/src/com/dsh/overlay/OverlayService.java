@@ -409,6 +409,7 @@ public class OverlayService extends Service {
         boolean autoPos = true;   // 用户拖过就设 false，重排时不动它
         float dragFrac = -1f;     // 拖动时在滑轨上的位置（0..1，-1=不在滑轨上）
         boolean resizeMoved = false;   // 缩放手柄是否已越过阈值
+        boolean docked = false;        // 已停靠到删除滑轨（此时只能左右滑）
         boolean statusTimerStarted = false;
         int statusFails = 0;
         int curW = 0, curH = 0;   // 当前实际尺寸（relayoutAuto 要用）
@@ -607,69 +608,97 @@ public class OverlayService extends Service {
                             moved = false; downAt = System.currentTimeMillis();
                             return true;
                         case MotionEvent.ACTION_MOVE:
-                            int dx = (int)(e.getRawX() - downX);
+int dx = (int)(e.getRawX() - downX);
                             int dy = (int)(e.getRawY() - downY);
                             if (Math.abs(dx) > dp(6) || Math.abs(dy) > dp(6)) moved = true;
-                            if (moved) {
-                                autoPos = false;   // 用户拖过 → 以后重排不动它
-                                // **限制在屏幕内，别让窗口被拖到看不见**。
-                                // 实机踩到：窗口被拖到 x=-227，完全跑出左边缘，用户再也点不到。
-                                int sw = getResources().getDisplayMetrics().widthPixels;
-                                int sh = getResources().getDisplayMetrics().heightPixels;
-                                int ww2 = Math.max(dp(40), curW);
-                                int hh2 = Math.max(dp(40), curH);
-                                int minX = -(ww2 - dp(72));          // 至少留 72dp 在屏内
-                                int maxX = sw - dp(72);
-                                int minY = 0;
-                                int maxY = sh - dp(72);
-                                lp.x = Math.max(minX, Math.min(maxX, startX + dx));
-                                lp.y = Math.max(minY, Math.min(maxY, startY + dy));
-                                try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
+                            if (!moved) return true;
 
-                                // **拖到屏幕下半部 → 出现删除滑轨**
-                                int screenH = getResources().getDisplayMetrics().heightPixels;
-                                int screenW = getResources().getDisplayMetrics().widthPixels;
-                                // **必须拖得够远才出滑轨**：
-                                // 用户正常滑动页面时手指扫过窗口，不该弹出删除滑轨
-                                boolean farEnough = (Math.abs(dx) > dp(40) || Math.abs(dy) > dp(40));
-                                if (farEnough && e.getRawY() > screenH * 0.62f) {
-                                    showRail();
-                                    float frac = (e.getRawX() - railLeft())
-                                            / Math.max(1f, (railRight() - railLeft()));
-                                    moveRailKnob(frac);
-                                    dragFrac = frac;
-                                } else {
-                                    hideRail();
-                                    dragFrac = -1f;
-                                }
+                            int sw = getResources().getDisplayMetrics().widthPixels;
+                            int sh = getResources().getDisplayMetrics().heightPixels;
+
+                            // ═══ 已停靠：只允许沿滑轨左右移动，不跟手指乱跑 ═══
+                            if (docked) {
+                                int span = Math.max(1, railRight() - railLeft());
+                                float f = (e.getRawX() - railLeft()) / (float) span;
+                                f = Math.max(0f, Math.min(1f, f));
+                                dragFrac = f;
+                                moveRailKnob(f);
+                                // 窗口跟着手柄走，视觉上像「攥着滑块」
+                                lp.x = railLeft() + Math.round(f * (span - Math.min(curW, span)));
+                                lp.y = railY() - curH / 2;
+                                try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
+                                return true;
+                            }
+
+                            // ═══ 未停靠：正常拖动，但**必须拖进停靠区才亮滑轨** ═══
+                            autoPos = false;
+                            int ww2 = Math.max(dp(40), curW);
+                            int hh2 = Math.max(dp(40), curH);
+                            // **至少一半留在屏内。**
+                            // 原来允许留 72dp，实测窗口跑到 x=-156（大半在屏外），用户找不着。
+                            int keepX = Math.max(dp(72), ww2 / 2);
+                            lp.x = Math.max(-(ww2 - keepX), Math.min(sw - keepX, startX + dx));
+                            lp.y = Math.max(0, Math.min(sh - dp(72), startY + dy));
+                            try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
+
+                            // **停靠区 = 屏幕左下角一块明确区域**（不是整个下半屏）。
+                            // 用户要求：先拖到这里停靠，才能往右拖删除 —— 防误触。
+                            int dockX = railLeft() + dp(40);
+                            int dockY = railY();
+                            boolean inDock = e.getRawX() < dockX + dp(120)
+                                          && Math.abs(e.getRawY() - dockY) < dp(90);
+                            if (inDock) {
+                                showRail();
+                                moveRailKnob(0f);
+                                dragFrac = 0f;
+                            } else {
+                                hideRail();
+                                dragFrac = -1f;
                             }
                             return true;
                         case MotionEvent.ACTION_UP:
-                            // **拖到滑轨最右端 = 删除这块屏**
-                            if (moved && dragFrac >= 0.82f) {
-                                hideRail();
-                                final int dp2 = port;
-                                Log.i(TAG, "用户拖到滑轨右端，删除 port=" + dp2);
-                                notifyUserDeleted(dp2);          // 通知 AI
-                                ui.post(new Runnable() {
-                                    public void run() {
-                                        // 关窗口 + 通知 Node 侧停这块屏的推流
-                                        try {
-                                            java.net.HttpURLConnection c = (java.net.HttpURLConnection)
-                                                    new java.net.URL("http://127.0.0.1:38820/stopdisplay")
-                                                            .openConnection();
-                                        } catch (Throwable t) { /* ignore */ }
-                                        removeWin(dp2);
-                                    }
-                                });
+                            // ═══ 已停靠时松手：滑到最右才删，否则退回 ═══
+                            if (docked) {
+                                if (dragFrac >= 0.82f) {
+                                    docked = false;
+                                    hideRail();
+                                    final int dp2 = port;
+                                    Log.i(TAG, "停靠后拖到右端 → 删除 port=" + dp2);
+                                    notifyUserDeleted(dp2);
+                                    ui.post(new Runnable() {
+                                        public void run() { removeWin(dp2); }
+                                    });
+                                } else {
+                                    // 没到右端：留在滑轨上，不删
+                                    Log.i(TAG, "停靠未到位，保留 port=" + port + " frac=" + dragFrac);
+                                    dragFrac = 0f;
+                                    moveRailKnob(0f);
+                                }
                                 return true;
                             }
+
+                            // ═══ 未停靠：松手时如果在停靠区 → 进入停靠状态 ═══
+                            int dockX2 = railLeft() + dp(40);
+                            boolean landDock = moved
+                                    && e.getRawX() < dockX2 + dp(120)
+                                    && Math.abs(e.getRawY() - railY()) < dp(90);
+                            if (landDock) {
+                                docked = true;
+                                showRail();
+                                dragFrac = 0f;
+                                moveRailKnob(0f);
+                                lp.x = railLeft();
+                                lp.y = railY() - curH / 2;
+                                try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
+                                Log.i(TAG, "已停靠到滑轨 port=" + port);
+                                return true;
+                            }
+
                             hideRail();
                             dragFrac = -1f;
-                            // 点一下（没拖动）→ 最小化/恢复
                             if (!moved && System.currentTimeMillis() - downAt < 400) toggle();
                             return true;
-                    }
+                        }
                     return false;
                 }
             });
@@ -689,7 +718,7 @@ public class OverlayService extends Service {
             if (lp == null) return;
             int sw = getResources().getDisplayMetrics().widthPixels;
             int sh = getResources().getDisplayMetrics().heightPixels;
-            int keep = dp(72);
+            int keep = Math.max(dp(72), ww / 2);   // 至少一半可见
             lp.x = Math.max(-(ww - keep), Math.min(sw - keep, lp.x));
             lp.y = Math.max(0, Math.min(sh - keep, lp.y));
         }
@@ -935,7 +964,8 @@ public class OverlayService extends Service {
                 }
                 ui.post(new Runnable() {
                     public void run() {
-                        if (img != null && !collapsed && alive) img.setImageBitmap(fb);
+                        // **收起时也要刷新画面！** 原来写了 !collapsed，最小化后小预览永远停在第一帧
+                        if (img != null && alive) img.setImageBitmap(fb);
                     }
                 });
             } catch (Throwable t) { /* 单帧解码失败不影响流 */ }

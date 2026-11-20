@@ -157,21 +157,34 @@ public class Main {
      * 所以每次 /status 和被看时都查一下，屏没了就自己退。
      */
     static boolean displayAlive() {
+        // **首选 DisplayManagerGlobal.getDisplayInfo()：屏不存在时返回 null。**
+        //
+        // 实机踩到：scrcpy 那块屏（Node 进程持有）死了之后，
+        // framesrv 建的 dsh-frames 镜像还在，继续以 119fps 编码一片空白，
+        // 悬浮窗就永远显示冻结画面 —— 用户说「悬浮窗不停留在闲鱼上」就是这个。
+        //
+        // 原来的实现走 IDisplayManager$Stub 反射，失败时返回 true（保底不误杀），
+        // 结果在这种场景下永远不会自杀。改成下面这条路，失败才退到旧判据。
         try {
-            // app_process 里没有 Context，只能走 ServiceManager 拿 IDisplayManager
+            Class<?> dmg = Class.forName("android.hardware.display.DisplayManagerGlobal");
+            Object inst = dmg.getMethod("getInstance").invoke(null);
+            Object info = dmg.getMethod("getDisplayInfo", int.class).invoke(inst, displayId);
+            return info != null;          // null = 这块屏已经不存在
+        } catch (Throwable t) {
+            // 退路：用 ServiceManager 列 id
+        }
+        try {
             Class<?> sm = Class.forName("android.os.ServiceManager");
             Object dms = sm.getMethod("getService", String.class).invoke(null, "display");
-            if (dms == null) return true;   // 查不到就不擅自杀
+            if (dms == null) return true;
             Class<?> stub = Class.forName("android.hardware.display.IDisplayManager$Stub");
             Object idm = stub.getMethod("asInterface", Class.forName("android.os.IBinder")).invoke(null, dms);
-            // getDisplayInfo(int) 不存在就直接用 exists 判据：调 getDisplayIds()
-            Object ids = idm.getClass().getMethod("getDisplayIds").invoke(idm);
-            int[] arr = (int[]) ids;
+            int[] arr = (int[]) idm.getClass().getMethod("getDisplayIds").invoke(idm);
             if (arr == null) return true;
             for (int x : arr) if (x == displayId) return true;
             return false;
         } catch (Throwable t) {
-            return true;   // 反射失败就当它活着，不误杀
+            return true;   // 两条路都失败才保底
         }
     }
 

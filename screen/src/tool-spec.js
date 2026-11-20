@@ -562,7 +562,7 @@ export function userStateSpec() {
   };
 }
 
-/** 查某个 App 的风控等级（读 docs/risk.json，42 个 App 已标注）。 */
+/** 查某个 App 的风控等级（读 docs/risk.json，44 个 App 已标注）。 */
 export function riskCheckSpec() {
   return {
     name: 'screen_risk',

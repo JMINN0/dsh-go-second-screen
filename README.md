@@ -178,7 +178,7 @@ vdisplayd（常驻守护进程，握着虚拟屏）
 | scrcpy 的 H.264 视频流 | **34.3fps**（29ms） | 411 帧 / 12 秒，但需要解码 |
 | **ImageReader（本项目快路径）** | **15ms**（67fps） | 从合成器直接拿 buffer，**没有回读开销** |
 
-做法是写一个 Java 程序（`framesrv/src/com/dsh/framesrv/Main.java`，600 行），用 `app_process` 跑起来：
+做法是写一个 Java 程序（`framesrv/src/com/dsh/framesrv/Main.java`，772 行），用 `app_process` 跑起来：
 反射调 `DisplayManager.createVirtualDisplay()`，把虚拟屏**镜像进一个 `ImageReader`**，
 自己在进程内起一个 HTTP server 吐 JPEG：
 
@@ -568,7 +568,7 @@ MediaProjection 替代 screencap、多 AI broker 完整版、跨进程租约。
 |---|---|
 | `vdisplay_text` | OCR 读屏，返回文字 + 像素坐标 + `nx/ny` + 置信度。**0 图片 token** |
 | `vdisplay_find` | 只找文字，返回坐标不点击；支持 contains / exact / regex，找不到会给相近词建议 |
-| `vdisplay_tap_text` | 找到文字并点击。**比让模型自己看 OCR 坐标再算准得多**（那个环节是 17.6% 点空率的主因） |
+| `vdisplay_tap_text` | 找到文字并点击。**比让模型自己看 OCR 坐标再算准得多**（那个环节是 （一种曾经引用过但推导有误的比例） 点空率的主因） |
 
 ### 6.6 找图与颜色（4）
 

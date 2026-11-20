@@ -627,7 +627,7 @@ export async function text(args) {
  * 2026-11-17 抢键盘事故就是这么发生的：我用 mcp__phone__open 打开 Edge，
  * 用户正在 DSH Go 里打字的 InputConnection 被 detach，半截草稿丢了。
  *
- * 同理 `docs/risk.json` 记了 42 个 App 的风控等级（带 forbid:["batch","pay"]），
+ * 同理 `docs/risk.json` 记了 44 个 App 的风控等级（带 forbid:["batch","pay"]），
  * 但全库零引用 —— PLAYBOOK 里「L3 只读」只是散文，模型可以直接在微信/支付宝上
  * 点发送转账，没有任何自动拦截。
  *

@@ -23,7 +23,7 @@ SurfaceFlinger 图层、独立的窗口栈、独立的输入焦点。物理屏�
 - **虚拟屏创建**：`scrcpy-server` 的 `new_display` 模式，或直接 `DisplayManager.createVirtualDisplay`
 - **无 root 为什么可行**：`app_process` 以 shell（uid 2000）身份运行，能拿到 `ADD_TRUSTED_DISPLAY`、
   `INTERNAL_SYSTEM_WINDOW` 等签名级权限；这些权限通过 `app_process` 的 shell 身份继承
-- **取帧**：`ImageReader` 直接读虚拟屏 Surface（53-114fps），比 screencap（~143ms/次）快一个数量级
+- **取帧**：`ImageReader` 直接读虚拟屏 Surface（探针实测 67fps；MJPEG 出流 44.8fps），比 screencap（~143ms/次）快一个数量级
 - **输入注入**：scrcpy 控制通道 `INJECT_TOUCH_EVENT`，支持多点触控（action 必须发基础值 0/1/2，
   索引由服务端自己移位拼接 —— 客户端自己编码会被截断）
 - **实时预览**：`TYPE_APPLICATION_OVERLAY` 悬浮窗 + MJPEG（帧间隔中位 17ms）

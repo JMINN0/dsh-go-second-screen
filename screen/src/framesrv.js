@@ -115,13 +115,26 @@ function allocPort() {
   return 0;
 }
 
-/** 查这块屏的真实尺寸。 */
+/**
+ * 查这块屏**当前**的尺寸。
+ *
+ * **必须用 `app W x H`，不能用 `real W x H`。**
+ * `dumpsys display` 里 `real` 是自然尺寸（= DisplayDeviceInfo），旋转后**不变**；
+ * `app` 才是应用实际在用的尺寸，跟随旋转。
+ *
+ * 用 real 的后果：屏已经是横向时启动取帧服务，会把 720×1592 传进去，
+ * 第一帧方向就是错的（有尺寸看门狗会自愈，但开头那段是歪的）。
+ *
+ * 优先 app，取不到退 real，都没有才用调用方给的兜底值。
+ */
 async function realSize(target, displayId, fallbackW, fallbackH) {
   try {
     const r = await run('adb', ['-s', target, 'shell',
-      `dumpsys display 2>/dev/null | grep -A6 "Display ${displayId}:" | grep -oE "real [0-9]+ x [0-9]+" | head -1`],
+      `dumpsys display 2>/dev/null | grep -A8 "Display ${displayId}:" | grep -oE "(app|real) [0-9]+ x [0-9]+" | head -2`],
       { timeout: 8000 });
-    const m = String(r.stdout || '').match(/real (\d+) x (\d+)/);
+    const out = String(r.stdout || '');
+    let m = out.match(/app (\d+) x (\d+)/);         // 跟随旋转，首选
+    if (!m) m = out.match(/real (\d+) x (\d+)/);    // 物理兜底
     if (m) return { w: Number(m[1]), h: Number(m[2]) };
   } catch { /* 查不到就用传入值 */ }
   return { w: fallbackW, h: fallbackH };

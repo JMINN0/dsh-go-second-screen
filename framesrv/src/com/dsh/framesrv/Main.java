@@ -62,11 +62,181 @@ public class Main {
     static int displayId = 0;
     static int port = 38810;
     static int outWidth = 400;
-    static int srcW = 720, srcH = 1592;
+    static volatile int srcW = 720, srcH = 1592;   // volatile：/status 在连接线程里读
 
     static ImageReader reader;
     static VirtualDisplay vd;
     static volatile byte[] latest = null;
+
+    /** 帧回调（建 reader 时挂上；重建时复用同一个对象，避免重复写匿名类）。 */
+    static volatile ImageReader.OnImageAvailableListener frameListener = null;
+
+    /**
+     * **回调用的 Handler，必须显式传。**
+     *
+     * ImageReader.setOnImageAvailableListener(listener, null) 在 handler 为 null 时
+     * 会用 `Looper.myLooper()`。首建发生在 main 里（已 prepareMainLooper）所以没事，
+     * 但**旋转重建是从 size-watch 线程发起的，那个线程没有 Looper** →
+     * 抛 `IllegalArgumentException: handler is null but the current thread is not a looper`。
+     * 正好是最需要它的那条路会炸。所以把 main 里的 Handler 存下来，重建时显式传。
+     */
+    static volatile Handler cbHandler = null;
+
+    /** 当前镜像的 ImageReader / VirtualDisplay，尺寸变化时会重建。 */
+    // reader/vd 的声明在上面（行 67-68）已有，不重复声明
+
+    /**
+     * **建一块镜像：ImageReader + VirtualDisplay，尺寸由参数决定。**
+     *
+     * 单独抽出来是因为要能重建：虚拟屏带 FLAG_ROTATES_WITH_CONTENT，
+     * App 强制横屏时屏会从 720×1592 变成 1592×720，
+     * 而原来这里尺寸是建的时候定死的、永不更新 ——
+     * 结果投横屏游戏时画面只出现在顶部一条，其余全黑（2026-11-20 实测）。
+     */
+    /**
+     * 建镜像：ImageReader + VirtualDisplay。
+     *
+     * **顺序很重要：先建新的，成功了再拆旧的。**
+     * 反过来（先 closeMirror 再建）的话，一旦新建失败（尺寸非法、binder 拒绝、
+     * OOM），一块本来好好工作的镜像就被毁了 —— /frame.jpg 503、
+     * MJPEG 没有新帧，直到下一次重试成功。实测踩过。
+     *
+     * @return true = 新镜像已生效
+     */
+    static synchronized boolean openMirror(int w, int h) {
+        // 防御：异常尺寸会把 ImageReader 撑爆
+        if (w < 64 || h < 64 || w > 4096 || h > 4096) return false;
+        if ((long) w * h > 4_000_000L) return false;
+
+        startWriter();   // 幂等；写线程从 pendingJpg 取帧发 MJPEG
+
+        ImageReader nr = null;
+        VirtualDisplay nvd = null;
+        try {
+            nr = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
+            nr.setOnImageAvailableListener(frameListener, cbHandler);   // 显式 Handler
+            Method m = DisplayManager.class.getDeclaredMethod("createVirtualDisplay",
+                    String.class, int.class, int.class, int.class, Surface.class);
+            m.setAccessible(true);
+            nvd = (VirtualDisplay) m.invoke(null, "dsh-frames", w, h, displayId, nr.getSurface());
+            if (nvd == null) throw new IllegalStateException("vd == null");
+
+            // —— 到这里新镜像已经能用，才拆旧的 ——
+            VirtualDisplay oldVd = vd;
+            ImageReader oldReader = reader;
+            vd = nvd;
+            reader = nr;
+            srcW = w;
+            srcH = h;
+            // 旧方向的一帧不能发出去
+            latest = null;
+            pendingJpg = null;
+            synchronized (bmpLock) {
+                if (lastBmp != null) { try { lastBmp.recycle(); } catch (Throwable t) { } lastBmp = null; }
+            }
+            try { if (oldVd != null) { oldVd.setSurface(null); oldVd.release(); } } catch (Throwable t) { }
+            try { if (oldReader != null) oldReader.close(); } catch (Throwable t) { }
+            System.out.println("MIRROR_OK true " + w + "x" + h);
+            return true;
+        } catch (Throwable t) {
+            System.out.println("ERR_MIRROR " + t.getClass().getSimpleName() + ": " + t.getMessage());
+            Throwable c = t.getCause();
+            if (c != null) System.out.println("  cause: " + c);
+            // 新建的全回收，**现有镜像保持不动**
+            try { if (nvd != null) { nvd.setSurface(null); nvd.release(); } } catch (Throwable t2) { }
+            try { if (nr != null) nr.close(); } catch (Throwable t2) { }
+            return false;
+        }
+    }
+
+    /** 拆掉镜像（幂等）。 */
+    static synchronized void closeMirror() {
+        try { if (vd != null) { vd.setSurface(null); vd.release(); } } catch (Throwable t) { }
+        vd = null;
+        try { if (reader != null) reader.close(); } catch (Throwable t) { }
+        reader = null;
+    }
+
+    /**
+     * **尺寸看门狗**：每 1.5 秒查一次目标屏的真实尺寸，变了就重建镜像。
+     *
+     * 用 DisplayManagerGlobal.getDisplayInfo() 拿 logvid 尺寸 ——
+     * 这是 app_process 里没有 Context 也能用的路径。
+     */
+    static volatile long lastRebuildAt = 0;
+
+    /**
+     * 尺寸看门狗：每秒查一次，**连续两次读到同一个新尺寸才重建**。
+     *
+     * 去抖的理由：App 转屏有中间态（窗口重排过程中尺寸会短暂跳变），
+     * 看到一次就重建会在动画中间反复拆建。限速 1.5 秒同理。
+     * 失败时打印一次，避免"永远不生效但也没人说"。
+     */
+    static void startSizeWatch() {
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                int pw = 0, ph = 0, same = 0;
+                boolean failLogged = false;
+                while (true) {
+                    try {
+                        Thread.sleep(1000);
+                        int[] wh = displaySize();
+                        if (wh == null) {
+                            same = 0;
+                            if (!failLogged) { System.out.println("SIZE_PROBE_FAIL"); failLogged = true; }
+                            continue;
+                        }
+                        failLogged = false;
+                        if (wh[0] == srcW && wh[1] == srcH) { same = 0; continue; }
+                        if (wh[0] == pw && wh[1] == ph) same++;
+                        else { pw = wh[0]; ph = wh[1]; same = 1; }
+                        if (same < 2) continue;                      // 连续两次一致才动手
+                        if (System.currentTimeMillis() - lastRebuildAt < 1500) continue;
+                        lastRebuildAt = System.currentTimeMillis();
+                        System.out.println("RESIZE " + srcW + "x" + srcH + " -> " + pw + "x" + ph);
+                        openMirror(pw, ph);
+                    } catch (Throwable t) { }
+                }
+            }
+        }, "size-watch");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * 查目标屏**当前**的真实像素尺寸；查不到返回 null。
+     *
+     * **不用 DisplayManagerGlobal.logicalWidth/Height。**
+     * 项目自己在 `screen/src/vd.js` 里记录过：`dumpsys display` 报的是虚拟屏
+     * 初始声明尺寸（比如 720x1592），App 强制横屏后实际是 1592x720 ——
+     * 也就是说这类"声明尺寸"会滞后，拿它做看门狗判据可能永远不触发。
+     *
+     * 改用 `dumpsys window displays` 里的 `cur=WxH`，那个是合成器当前真正在用的。
+     * 这条路要走 shell，用 Runtime.exec 跑。
+     */
+    static int[] displaySize() {
+        try {
+            Process pr = Runtime.getRuntime().exec(new String[]{
+                "sh", "-c",
+                "dumpsys window displays 2>/dev/null | grep -A3 \"Display: mDisplayId=" + displayId + "\" | grep -oE 'cur=[0-9]+x[0-9]+' | head -1"
+            });
+            java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(pr.getInputStream()));
+            String line = br.readLine();
+            br.close();
+            try { pr.waitFor(); } catch (Throwable t) { }
+            if (line == null) return null;
+            java.util.regex.Matcher m =
+                    java.util.regex.Pattern.compile("cur=(\\d+)x(\\d+)").matcher(line.trim());
+            if (!m.find()) return null;
+            int w = Integer.parseInt(m.group(1));
+            int h = Integer.parseInt(m.group(2));
+            if (w <= 0 || h <= 0) return null;
+            return new int[]{w, h};
+        } catch (Throwable t) {
+            return null;
+        }
+    }
 
     /**
      * **写 MJPEG 必须异步，否则客户端慢会把采集线程堵死。**
@@ -204,6 +374,7 @@ public class Main {
         HandlerThread th = new HandlerThread("framesrv");
         th.start();
         Handler h = new Handler(th.getLooper());
+        cbHandler = h;   // 存下来给 openMirror 重建时用（size-watch 线程没 Looper）
 
         // 每秒算一次 fps + **空闲自杀**
         new Thread(new Runnable() {
@@ -224,13 +395,16 @@ public class Main {
         }).start();
 
         // 建 ImageReader
-        reader = ImageReader.newInstance(srcW, srcH, PixelFormat.RGBA_8888, 2);
-        reader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
+        // ImageReader 和镜像都由 openMirror() 创建（尺寸变化时会重建）
+        frameListener = new ImageReader.OnImageAvailableListener() {
             public void onImageAvailable(ImageReader r) {
                 Image img = null;
                 try {
                     img = r.acquireLatestImage();
                     if (img == null) return;
+                    // **旧 reader 的迟到帧丢掉**：重建后旧 reader 可能还有回调，
+                    // 会把旧尺寸的帧写回 latest，造成旋转后闪一帧旧方向画面。
+                    if (r != reader) return;
                     frames.incrementAndGet();
                     lastSecFrames.incrementAndGet();
                     // **没人看就不编码** —— 只统计帧数，把 buffer 直接还回去。
@@ -254,23 +428,11 @@ public class Main {
                     if (img != null) try { img.close(); } catch (Throwable t3) { }
                 }
             }
-        }, h);
+        };
 
-        // 镜像目标屏
-        try {
-            Surface surf = reader.getSurface();
-            Method m = DisplayManager.class.getDeclaredMethod("createVirtualDisplay",
-                    String.class, int.class, int.class, int.class, Surface.class);
-            m.setAccessible(true);
-            startWriter();   // 异步写线程先起来
-            vd = (VirtualDisplay) m.invoke(null, "dsh-frames", srcW, srcH, displayId, surf);
-            System.out.println("MIRROR_OK " + (vd != null));
-        } catch (Throwable t) {
-            System.out.println("ERR_MIRROR " + t.getClass().getSimpleName() + ": " + t.getMessage());
-            Throwable c = t.getCause();
-            if (c != null) System.out.println("  cause: " + c);
-            System.exit(2);
-        }
+        // 建 ImageReader + 镜像
+        openMirror(srcW, srcH);
+        startSizeWatch();   // 尺寸变了就重建镜像
 
         // ===== HTTP 服务器 =====
         try {
@@ -515,7 +677,7 @@ public class Main {
                     System.exit(0);
                 }
                 String j = "{\"running\":" + alive + ",\"frames\":" + frames.get()
-                        + ",\"fps\":" + fps + ",\"width\":" + outWidth
+                        + ",\"fps\":" + fps + ",\"width\":" + outWidth + ",\"srcWidth\":" + srcW + ",\"srcHeight\":" + srcH
                         + ",\"aspect\":" + ((double) srcW / srcH) + "}";
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
                         + j.length() + "\r\nCache-Control: no-store\r\n\r\n" + j).getBytes());

@@ -441,6 +441,20 @@ export async function start({ width = 0, height = 0, dpi = 320, systemDecoration
       finalWidth = height;
       finalHeight = width;
     }
+  } else if (orientation === 'square') {
+      /* **正方形：旋转不变的尺寸。**
+       *
+       * 虚拟屏带 FLAG_ROTATES_WITH_CONTENT —— App 强制横屏时屏的**尺寸会真的变**
+       * （720×1592 → 1592×720），而取帧服务的镜像是建的时候定死的，
+       * 结果投横屏游戏时画面挤在顶部一条、其余全黑（2026-11-20 实测）。
+       *
+       * 720×720 转 90° 还是 720×720，**尺寸不变**，从根上绕开这个问题。
+       *
+       * 边长取「短边」再夹在 720~1080：太小横屏游戏看不清，太大拖慢编码。
+       */
+      const side = Math.min(1080, Math.max(720, Math.min(width, height)));
+    finalWidth = side;
+    finalHeight = side;
   }
   // 如果 orientation 是具体数值（旋转角度），这里暂时不处理，
   // 因为 scrcpy new_display 不直接支持旋转参数，只支持尺寸。

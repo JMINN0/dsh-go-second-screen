@@ -1,0 +1,47 @@
+{
+  "name": "dsh-go-second-screen",
+  "version": "0.1.0",
+  "private": true,
+  "description": "安卓「后台屏」：用虚拟屏让 AI 在后台操作手机，完全不抢用户主屏和键盘。无 root，基于 scrcpy + app_process。",
+  "keywords": [
+    "dsh-plugin",
+    "dsh-go",
+    "android",
+    "virtual-display",
+    "scrcpy",
+    "ai-agent",
+    "computer-use",
+    "phone-automation",
+    "no-root",
+    "后台屏",
+    "虚拟屏"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/JMINN0/dsh-go-second-screen#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JMINN0/dsh-go-second-screen.git"
+  },
+  "workspaces": [
+    "screen",
+    "web",
+    "watch",
+    "plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./screen/cordis.patch.yml"
+    },
+    "plugins": [
+      "screen",
+      "web",
+      "watch",
+      "plugin"
+    ]
+  },
+  "scripts": {
+    "fetch-sdk": "bash tools/fetch-sdk.sh",
+    "build:overlay": "bash overlay/build.sh",
+    "build:framesrv": "bash framesrv/build.sh"
+  }
+}

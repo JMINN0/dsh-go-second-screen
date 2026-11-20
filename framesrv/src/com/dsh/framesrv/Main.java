@@ -67,6 +67,59 @@ public class Main {
     static ImageReader reader;
     static VirtualDisplay vd;
     static volatile byte[] latest = null;
+
+    /**
+     * **写 MJPEG 必须异步，否则客户端慢会把采集线程堵死。**
+     *
+     * 原来在 onImageAvailable（ImageReader 回调线程）里直接
+     *   encode() + o.write() + o.flush()
+     * 客户端（悬浮窗）解码慢一点，socket 缓冲区满了 write 就阻塞，
+     * 于是采集回调被卡住 → 帧在队列里堆积 → **延迟越来越大**（用户实测「延迟很多」）。
+     *
+     * 现在：采集线程只负责编码并放入 pending，立刻返回；
+     * 独立线程取出「最新一帧」写给客户端，旧帧直接丢弃（实时预览丢帧是对的）。
+     */
+    static final Object pendingLock = new Object();
+    static volatile byte[] pendingJpg = null;
+    static volatile boolean writerRunning = false;
+
+    /** 启动异步写线程（幂等）。 */
+    static void startWriter() {
+        if (writerRunning) return;
+        writerRunning = true;
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                while (true) {
+                    byte[] jpg = null;
+                    synchronized (pendingLock) {
+                        if (pendingJpg != null) {
+                            jpg = pendingJpg;
+                            pendingJpg = null;      // **只取最新，旧的自己覆盖掉**
+                        }
+                    }
+                    if (jpg == null) {
+                        try { Thread.sleep(8); } catch (Throwable t2) { }
+                        continue;
+                    }
+                    for (Socket s : mjpegClients) {
+                        try {
+                            OutputStream o = s.getOutputStream();
+                            o.write(("--dshframe\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                    + jpg.length + "\r\n\r\n").getBytes());
+                            o.write(jpg);
+                            o.write("\r\n".getBytes());
+                            o.flush();
+                        } catch (Throwable t3) {
+                            mjpegClients.remove(s);
+                            try { s.close(); } catch (Throwable t4) { }
+                        }
+                    }
+                }
+            }
+        }, "mjpeg-writer");
+        t.setDaemon(true);
+        t.start();
+    }
     // **缓存最后一帧的原始像素**，收到 /mark 时用它重编一张带标记的。
     // 为什么必须：画面静止时 ImageReader 不出新帧，`latest` 永远是标记之前那张，
     // 标记就永远不出现（实机踩到）。收到 /mark 要能自己主动重画一帧。
@@ -177,18 +230,9 @@ public class Main {
                     byte[] jpg = encode(img);
                     if (jpg != null) {
                         latest = jpg;
-                        for (Socket s : mjpegClients) {
-                            try {
-                                OutputStream o = s.getOutputStream();
-                                o.write(("--dshframe\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                                        + jpg.length + "\r\n\r\n").getBytes());
-                                o.write(jpg);
-                                o.write("\r\n".getBytes());
-                                o.flush();
-                            } catch (Throwable t) {
-                                mjpegClients.remove(s);
-                                try { s.close(); } catch (Throwable t2) { }
-                            }
+                        // **只放入 pending，立刻返回** —— 写 socket 交给独立线程
+                        synchronized (pendingLock) {
+                            pendingJpg = jpg;
                         }
                     }
                 } catch (Throwable t) {
@@ -205,6 +249,7 @@ public class Main {
             Method m = DisplayManager.class.getDeclaredMethod("createVirtualDisplay",
                     String.class, int.class, int.class, int.class, Surface.class);
             m.setAccessible(true);
+            startWriter();   // 异步写线程先起来
             vd = (VirtualDisplay) m.invoke(null, "dsh-frames", srcW, srcH, displayId, surf);
             System.out.println("MIRROR_OK " + (vd != null));
         } catch (Throwable t) {
@@ -223,6 +268,11 @@ public class Main {
                     while (true) {
                         try {
                             final Socket s = ss.accept();
+                            // **必须关掉 Nagle。**
+                            // 原来没设：每帧要写「头部 + JPEG + CRLF」三次，
+                            // Nagle 会把小包攒着等 ACK，加上对端延迟确认，
+                            // 单帧能多出 40-200ms —— 用户实测「延迟很多」就是这个。
+                            try { s.setTcpNoDelay(true); } catch (Throwable t0) { }
                             new Thread(new Runnable() { public void run() { handle(s); } }).start();
                         } catch (Throwable t) { return; }
                     }
@@ -296,26 +346,8 @@ public class Main {
                         android.graphics.Paint pt = new android.graphics.Paint();
                         pt.setAntiAlias(true);
                         float tw = target.getWidth(), th = target.getHeight();
-                        float cx = markNx * tw, cy = markNy * th;
-                        // 透明度：最新 1.0 → 2 秒后 0.45 常驻
-                        int alpha = (age < 2000) ? 255 : 115;
-                        float arm = Math.max(9f, tw * 0.028f);
-                        float thick = Math.max(3f, tw * 0.008f);
-                        // 白色描边（深色背景也看得见）
-                        pt.setColor(0x80FFFFFF);
-                        pt.setStyle(android.graphics.Paint.Style.STROKE);
-                        pt.setStrokeWidth(thick + 2);
-                        float boxR = Math.max(18f, tw * 0.055f);
-                        cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
-                        // 红色十字
-                        pt.setColor((alpha << 24) | 0xFF2D2D);
-                        pt.setStyle(android.graphics.Paint.Style.FILL);
-                        cv.drawRect(cx - arm, cy - thick, cx + arm, cy + thick, pt);
-                        cv.drawRect(cx - thick, cy - arm, cx + thick, cy + arm, pt);
-                        // 空心外框
-                        pt.setStyle(android.graphics.Paint.Style.STROKE);
-                        pt.setStrokeWidth(thick);
-                        cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
+                        // **水滴波纹**（点击动画，不再画十字）
+                        drawRipple(cv, pt, markNx * tw, markNy * th, age, tw, th);
                         java.io.ByteArrayOutputStream o2 = new java.io.ByteArrayOutputStream();
                         target.compress(Bitmap.CompressFormat.JPEG, 70, o2);
                         marked = o2.toByteArray();
@@ -335,6 +367,64 @@ public class Main {
     }
 
     /** 用缓存的最后一帧重编一张带标记的（/mark 时调）。 */
+    /**
+     * 画「水滴点击波纹」。
+     *
+     * 用户要的是「明显一点，像真的点击到了那个地方」。
+     * 所以不用十字准星，改用触屏反馈那种扩散圆环：
+     *   · 中心实心圆点（立刻出现，最醒目）
+     *   · 3 圈波纹，按 age 依次扩散 + 淡出
+     *   · 总时长 900ms
+     *
+     * @param age  点击后经过的毫秒数（0..900）
+     */
+    static void drawRipple(android.graphics.Canvas cv, android.graphics.Paint pt,
+                           float cx, float cy, long age, float tw, float th) {
+        float base = Math.max(14f, Math.min(tw, th) * 0.035f);
+        long dur = 900;
+
+        // ① 中心实心点：前 250ms 强，之后随波纹淡出
+        float dotAlpha = age < 250 ? 1.0f : Math.max(0f, 1.0f - (age - 250) / 650f);
+        pt.setStyle(android.graphics.Paint.Style.FILL);
+        pt.setColor(((int) (255 * dotAlpha) << 24) | 0xFF3B30);      // iOS 红
+        cv.drawCircle(cx, cy, base * 0.55f, pt);
+        // 中心白边，深色背景也清楚
+        pt.setStyle(android.graphics.Paint.Style.STROKE);
+        pt.setStrokeWidth(Math.max(2f, base * 0.10f));
+        pt.setColor(((int) (200 * dotAlpha) << 24) | 0xFFFFFF);
+        cv.drawCircle(cx, cy, base * 0.55f, pt);
+
+        // ② 3 圈波纹，错开 200ms 出发
+        for (int i = 0; i < 3; i++) {
+            long t = age - i * 200L;
+            if (t < 0 || t > dur) continue;
+            float p = t / (float) dur;                    // 0..1
+            float r = base * (0.5f + p * 3.2f);           // 扩散到 3.2 倍
+            int a = (int) (255 * (1.0f - p) * (1.0f - p)); // 二次淡出
+            pt.setStyle(android.graphics.Paint.Style.STROKE);
+            pt.setStrokeWidth(Math.max(1.5f, base * 0.22f * (1.0f - p * 0.6f)));
+            pt.setColor((a << 24) | 0xFF6B5B);
+            cv.drawCircle(cx, cy, r, pt);
+        }
+    }
+
+    /** 波纹动画：900ms 内连推 16 帧，让静止画面也能看到扩散效果。 */
+    static void startRippleAnim() {
+        Thread t = new Thread(new Runnable() {
+            public void run() {
+                long t0 = System.currentTimeMillis();
+                for (int i = 0; i < 16; i++) {
+                    long el = System.currentTimeMillis() - t0;
+                    if (el > 950) break;
+                    reencodeWithMark();
+                    try { Thread.sleep(58); } catch (Throwable t2) { }
+                }
+            }
+        }, "ripple-anim");
+        t.setDaemon(true);
+        t.start();
+    }
+
     static void reencodeWithMark() {
         try {
             android.graphics.Bitmap src;
@@ -347,21 +437,9 @@ public class Main {
             android.graphics.Paint pt = new android.graphics.Paint();
             pt.setAntiAlias(true);
             float tw = target.getWidth(), th = target.getHeight();
-            float cx = markNx * tw, cy = markNy * th;
-            float arm = Math.max(9f, tw * 0.028f);
-            float thick = Math.max(3f, tw * 0.008f);
-            float boxR = Math.max(18f, tw * 0.055f);
-            pt.setColor(0x80FFFFFF);
-            pt.setStyle(android.graphics.Paint.Style.STROKE);
-            pt.setStrokeWidth(thick + 2);
-            cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
-            pt.setColor(0xFFFF2D2D);
-            pt.setStyle(android.graphics.Paint.Style.FILL);
-            cv.drawRect(cx - arm, cy - thick, cx + arm, cy + thick, pt);
-            cv.drawRect(cx - thick, cy - arm, cx + thick, cy + arm, pt);
-            pt.setStyle(android.graphics.Paint.Style.STROKE);
-            pt.setStrokeWidth(thick);
-            cv.drawRect(cx - boxR, cy - boxR, cx + boxR, cy + boxR, pt);
+            // **水滴波纹**（原来画十字，用户说看不到点击效果）
+            drawRipple(cv, pt, markNx * tw, markNy * th,
+                       System.currentTimeMillis() - markAt, tw, th);
             java.io.ByteArrayOutputStream o = new java.io.ByteArrayOutputStream();
             target.compress(Bitmap.CompressFormat.JPEG, 70, o);
             byte[] jpg = o.toByteArray();
@@ -435,6 +513,7 @@ public class Main {
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=--dshframe\r\n"
                         + "Cache-Control: no-store\r\nConnection: keep-alive\r\n\r\n").getBytes());
                 out.flush();
+                try { s.setTcpNoDelay(true); } catch (Throwable t0) { }
                 mjpegClients.add(s);      // 不关，交给推送循环
                 byte[] j = latest;
                 if (j != null) {
@@ -480,9 +559,10 @@ public class Main {
                             }
                         }
                         markAt = System.currentTimeMillis();
-                        // **立刻用缓存的最后一帧重编一张带标记的**，
-                        // 不等下一个 ImageReader 回调（静止画面根本不回调）
+                        // **立刻重编一张，然后连播 16 帧形成动画。**
+                        // 静止画面时 ImageReader 不出新帧，不主动重绘就只会看到一张静图。
                         reencodeWithMark();
+                        startRippleAnim();
                     }
                     out.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".getBytes());
                 } catch (Throwable t) {

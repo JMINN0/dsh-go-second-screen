@@ -19,7 +19,7 @@
 
 **[tests/risk-sim/FULL-REPORT.md](tests/risk-sim/FULL-REPORT.md)** —— 六个本地靶场的完整实测记录。
 
-**[LIMITS.md](LIMITS.md)** —— 这个工具**做不到**什么，56 条，按原因分五类。
+**[LIMITS.md](LIMITS.md)** —— 这个工具**做不到**什么，25 条，按原因分五类。
 **[BROKER-DESIGN.md](BROKER-DESIGN.md)** —— 多 AI 多屏的架构设计（代码未实现）。
 **[tests/risk-sim/MULTI-SCREEN-FINDINGS.md](tests/risk-sim/MULTI-SCREEN-FINDINGS.md)** —— 多屏前置实验 U1-U6 实测结论。
 

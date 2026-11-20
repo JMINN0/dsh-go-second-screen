@@ -67,7 +67,7 @@ bash framesrv/build.sh     # 取帧服务 dex
 ## 文档索引
 
 - [README.md](README.md) — 完整说明、原理、安装、工具清单、FAQ
-- [LIMITS.md](LIMITS.md) — 56 条做不到的事，按原因分类
+- [LIMITS.md](LIMITS.md) — 25 条做不到的事，按原因分五类（平台限制 / 物理协议 / 需 root / 没做 / 原理上不可能）
 - [OPERATION-PRIORITY.md](OPERATION-PRIORITY.md) — 四档操作优先级（按打乱成本排）
 - [BROKER-DESIGN.md](BROKER-DESIGN.md) — 多 AI 多屏架构设计
 - [docs/OPERATION-PLAYBOOK.md](docs/OPERATION-PLAYBOOK.md) — 实战操作手册

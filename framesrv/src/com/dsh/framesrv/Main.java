@@ -115,10 +115,32 @@ public class Main {
         try {
             nr = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
             nr.setOnImageAvailableListener(frameListener, cbHandler);   // 显式 Handler
+            /* **第 4 个参数是 densityDpi，不是 displayId。**
+             *
+             * javap 出来的公共签名只有：
+             *   createVirtualDisplay(String, int w, int h, int densityDpi, Surface, int flags)
+             *   createVirtualDisplay(String, int, int, int, Surface, int, Callback, Handler)
+             * 之前把 displayId 当成第 4 个 int 传进去 →
+             * 镜像那块 dsh-frames 屏的 dpi 变成了 displayId 的值（实测 dumpsys 里出现 1dpi），
+             * 屏的 dp 尺寸算出来完全不对。
+             *
+             * 镜像只需要跟源屏同密度，用源屏的 dpi。
+             */
+            int mDpi = 320;
+            try {
+                Class<?> dmg = Class.forName("android.hardware.display.DisplayManagerGlobal");
+                Object inst = dmg.getMethod("getInstance").invoke(null);
+                Object info = dmg.getMethod("getDisplayInfo", int.class).invoke(inst, displayId);
+                if (info != null) {
+                    int d = info.getClass().getField("logicalDensityDpi").getInt(info);
+                    if (d > 0) mDpi = d;
+                }
+            } catch (Throwable t) { /* 拿不到就用 320 */ }
             Method m = DisplayManager.class.getDeclaredMethod("createVirtualDisplay",
                     String.class, int.class, int.class, int.class, Surface.class);
             m.setAccessible(true);
-            nvd = (VirtualDisplay) m.invoke(null, "dsh-frames", w, h, displayId, nr.getSurface());
+            nvd = (VirtualDisplay) m.invoke(null, "dsh-frames", w, h, mDpi, nr.getSurface());
+            System.out.println("MIRROR_DPI " + mDpi);
             if (nvd == null) throw new IllegalStateException("vd == null");
 
             // —— 到这里新镜像已经能用，才拆旧的 ——

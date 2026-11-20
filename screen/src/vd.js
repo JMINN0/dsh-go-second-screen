@@ -403,7 +403,10 @@ export function setActive(ctx) {
 export function newContext() { return makeState(); }
 
 /** 建一块私有虚拟屏。返回 {ok, displayId, sfId} */
-export async function start({ width = 0, height = 0, dpi = 320, systemDecorations = false, orientation, hwc = 'auto', maxFps = 60, imePolicy = 'hide' } = {}) {
+export async function start({ width = 0, height = 0, dpi = 320, systemDecorations = false, orientation = 'square', hwc = 'auto', maxFps = 60, imePolicy = 'hide' } = {}) {
+  // 记下调用方有没有显式传尺寸 —— square 分支靠它决定用默认值还是尊重传入值
+  const explicitSize = width > 0 && height > 0;
+
   // **尺寸自动探测**：不传 width/height 时按物理屏比例生成同比例的虚拟屏。
   // 虚拟屏是合成的（scrcpy new_display），跟物理屏大小无关，但比例会影响 App 的
   // 布局判断（平板/手机模式、横竖屏）。写死 720x1280 在 9:19.4 的屏上窄 25%，
@@ -452,7 +455,19 @@ export async function start({ width = 0, height = 0, dpi = 320, systemDecoration
        *
        * 边长取「短边」再夹在 720~1080：太小横屏游戏看不清，太大拖慢编码。
        */
-      const side = Math.min(1080, Math.max(720, Math.min(width, height)));
+      /* **边长 1080px，不是短边。**
+       *
+       * dpi 320 时 dp = px/2：
+       *   720×720   = 360dp  ⚠️ 低于「正常屏」门槛 470dp，部分 App 进小屏布局
+       *   1080×1080 = 540dp  ✅ 高于 470dp、低于平板门槛 600dp —— 唯一两边都安全
+       *   1280×1280 = 640dp  ⚠️ 触发 sw600dp，微信/Chrome/设置切平板双栏
+       *
+       * 之前按「短边」算，720 宽的屏上会给出 720×720，正好踩进风险区。
+       * 调用方显式传了 width/height 就尊重它（夹在 720~1080）。
+       */
+      const side = explicitSize
+        ? Math.min(1080, Math.max(720, Math.min(width, height)))
+        : 1080;
     finalWidth = side;
     finalHeight = side;
   }

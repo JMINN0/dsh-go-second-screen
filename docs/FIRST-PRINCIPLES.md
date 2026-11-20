@@ -41,7 +41,7 @@
 ### 0.3 先说结论
 
 **这套方法不是我们的专利。** 它用的是 Android 显示子系统本来就有的能力（多 display、
-每 display 独立窗口栈与输入路由），接口是公开的 `DisplayManager.createVirtualDisplay`，
+每 display 独立窗口栈与输入路由），入口是 `DisplayManager.createVirtualDisplay`，
 身份是 `adb shell` 本来就有的 uid 2000。任何一个能跑 adb 的 AI，只读源码就能自己复现
 （§4.6 有一份外部复现记录，连同它的证据边界）。
 
@@ -109,7 +109,7 @@ IME 的 `InputConnection` 从用户的输入框上 detach —— 用户正在拼
 ```
 给 AI 建一块 VirtualDisplay ——
   物理上存在（合成器真的在合成它）
-  用户看不见（没有 FLAG_PUBLIC，不投到任何物理面板）
+  用户看不见（虚拟屏没有物理输出设备接；不带 FLAG_PUBLIC 所以也枚举不到）
   焦点独立（FLAG_OWN_FOCUS）
   输入法不进来（display_ime_policy=hide）
 ```
@@ -285,7 +285,7 @@ const canHost = /FLAG_OWN_CONTENT_ONLY/.test(flags) && /FLAG_OWN_FOCUS/.test(fla
 | `FLAG_OWN_CONTENT_ONLY` | 屏上只显示**明确投到它上面**的内容，不复制默认屏 | 会变成镜像屏 —— 你看到的还是主屏，AI 点和你看的是同一份画面 |
 | `FLAG_OWN_FOCUS` | 这块屏有**自己的焦点**，不与默认屏共享（Android 14+ 才有的标志【实测·源码 `vd.js:7`】） | 一次点击会改全局焦点 → 用户前台被打断。这是"不抢焦点"的机制本体 |
 | `FLAG_OWN_DISPLAY_GROUP` | 这块屏独立成一个 display group | IME / 焦点策略跟默认屏绑在一起 → `hide` 也压不住输入法跟过来 |
-| **没有 `FLAG_PUBLIC`** | `PUBLIC` = 所有用户和应用都能访问这块屏 | **这就是"用户看不见"的机制本体**：非 public 的虚拟屏不投到任何物理输出设备上，普通 App 的 `DisplayManager.getDisplays()` 默认也枚举不到它 |
+| **没有 `FLAG_PUBLIC`** | `PUBLIC` 是**枚举可见性** —— 别的用户/App 能不能在显示列表里看到这块屏 | **决定的是“能不能被枚举到”，不是“画不画到面板上”**。一块 public 的虚拟屏照样不会画到物理面板（它没有物理 device 接）。物理不可见的原因是 §2.2.2 的条件一，不是这个 flag |
 
 `FLAG_ROTATES_WITH_CONTENT` 也在，但它带来一个新问题（§2.6），不是"能托管"的原因。
 
@@ -345,14 +345,20 @@ AI/Node ──exec──> adb shell screencap -d <SFID> -p
                     ├─ 合成器每帧把结果**写进你的 buffer**（GPU 合成，没有回读）
                     ├─ 你的进程收到 onImageAvailable 回调（事件驱动）
                     └─ 直接读 CPU 可读的 RGBA buffer → JPEG
-                  合计 ≈ 15ms/帧（67fps）
+                  合计 ≈ 15ms/帧（67fps，回调到达率）
+
+  注意这里有**两块屏**：
+    ① scrcpy 建的「后台屏」—— App 跑在上面
+    ② framesrv 建的「镜像屏」—— 用 createVirtualDisplay(..., displayIdToMirror=①) 镜像①，
+       它的输出 Surface 挂的是 ImageReader
+  取帧的代价里包含这第二次合成，图里没画出来容易让人以为是一块屏。
 ```
 
 **根本差别**：`screencap` 是"事后回读"——每次都要建立一次回读通路并搬运整帧；
 `ImageReader` 是"事前接入"——你从一开始就在合成通路上，帧是送给你的。
 
 【实测：`tests/IMAGEREADER-PROBE.md` —— 主屏对照 8.7fps、虚拟屏静止 4 秒 1 帧、虚拟屏动画
-269 回调 / 4 秒 = **67fps（15ms/帧）**，`firstMean=24` 说明不是黑屏；`README.md` §3.4 的对照表】
+269 回调 / 4 秒 = **67fps**（这是回调到达率，探针只做 32×32 采样；做成可交付 JPEG 还要逐行拷 + RGBA→ARGB + 缩放 + 编码，约 10–20ms/帧，端到端交付见 MJPEG 那行的 44.8fps），`firstMean=24` 说明不是黑屏；`README.md` §3.4 的对照表】
 
 #### 2.3.2 事件驱动是个意外的好性质
 
@@ -919,7 +925,7 @@ adb shell 'dumpsys display | grep -i scrcpy'
 
 ### 4.4 护城河在哪（不是技术保密）
 
-技术本身是公开的：`DisplayManager.createVirtualDisplay` 是公开 API，scrcpy 是开源项目，
+技术本身是公开的：`DisplayManager.createVirtualDisplay` 有一个公开重载（带 `densityDpi` 的那个），scrcpy 是开源项目，
 协议格式写在字节码里。**真正花时间的是这四样：**
 
 1. **49 个工具的完整性。** 不是 49 个功能，是 49 个"缺了它这一环就失败"的补齐。
@@ -937,7 +943,15 @@ adb shell 'dumpsys display | grep -i scrcpy'
 
 > **这套方法属于公开知识，谁都可以做。我们开源出来就是希望更多人来用和改进。**
 >
-> 它不依赖任何私有接口、不依赖 root、不注入别人的进程、不改系统分区。
+> **关于"私有接口"，必须说准确**：建屏这一步走的是 scrcpy-server，你不用自己碰隐藏 API；
+> 但**快取帧那一步必须反射调用 `@hide` 的 `createVirtualDisplay(String,int,int,int,Surface)`**
+> （第 4 个 int 是 `displayIdToMirror`），而且要 `setAccessible(true)`
+> —— 见 `framesrv/src/com/dsh/framesrv/Main.java`。
+>
+> **这是本项目最脆的一环**：隐藏 API 在 Android 大版本升级时可能改签名或消失，
+> 每次跨版本都要重测。我们只在 Android 16 上验证过。
+>
+> 不依赖的是：root、注入别人的进程、改系统分区。
 > 它只是用了 Android 显示子系统本来就有的能力，以及 `adb shell` 本来就有的身份。
 
 如果有人读完这份文档、自己写了一个更好的版本，那正是这份文档的目的。
@@ -972,6 +986,10 @@ adb shell 'dumpsys display | grep -i scrcpy'
 ## 五、做不到什么（按"为什么做不到"分类）
 
 `LIMITS.md` 共 **25 条**（A 8 + B 4 + C 3 + D 7 + E 3）。
+
+> **这个数字要打折看**：D 类 7 条是「没做但技术上能做」，不是做不到；
+> B-01/B-02 已被后续实测推翻；A-08 自己写着「理由不成立」；B-03 标着「待查」。
+> **真正站得住的边界大约 15-16 条。** 引用时请说「25 条边界（其中若干已推翻或待复核）」，别说「25 条做不到」。
 **分类标准是原因，不是功能**。这一节按原因摘，并把变动情况标出来。
 
 > ⚠️ **先记住一条方法论**：这份清单本身会过期。
@@ -1085,7 +1103,7 @@ adb shell 'dumpsys display | grep -i scrcpy'
 | `screencap -d` 一帧 | **143ms**（≈7fps），其中裸回读 141ms | `README.md` §3.4；`IMAGEREADER-PROBE.md` | 【实测】 |
 | 加 PNG 编码 + adb 传输 | **227–243ms**（2.5fps），+98ms 编码、+71ms 传输 | `README.md` §3.4 | 【实测·报告】 |
 | scrcpy H.264 流 | **34.3fps**（29ms），411 帧 / 12 秒 | `README.md` §3.4 | 【实测·报告】 |
-| **ImageReader 镜像（快路）** | **15ms/帧，67fps**（269 回调 / 4 秒） | `IMAGEREADER-PROBE.md` | 【实测】 |
+| **ImageReader 回调到达率** | **67fps**（269 回调 / 4 秒）—— 这是**合成→回调**的速率，探针只做 32×32 采样，**不是可交付 JPEG 的速率** | `IMAGEREADER-PROBE.md` | 【实测】 |
 | ImageReader 静止时 | 4 秒 **1 帧**（事件驱动，不动就不出帧） | 同上 | 【实测】 |
 | MJPEG 出流 | 4 秒 **179 帧**；间隔 平均 20.6ms / 中位 **17.0ms** / P90 33.1ms | `MEASUREMENTS` M1 | 【实测】**单次 4 秒样本，未重复测量** |
 | 悬浮窗与源屏一致性 | 平均像素差 **3.1**（同画面） | `MEASUREMENTS` M5 | 【实测】 |

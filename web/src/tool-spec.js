@@ -88,7 +88,7 @@ export function fillSpec() {
     description: [
       'Type into an input/textarea by CSS selector.',
       WHY,
-      'Uses Input.insertText so frameworks (React/Vue) actually receive the change event. Setting',
+      'Dispatches per-character key events (not Input.insertText) so frameworks see a real key sequence. Setting',
       'element.value directly leaves their state empty — that is why the page says "still blank".',
     ].join('\n'),
     parameters: {

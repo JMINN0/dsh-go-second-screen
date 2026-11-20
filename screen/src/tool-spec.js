@@ -310,7 +310,7 @@ export function newScreenSpec() {
       '4-6 块要看你手机上跑的 App 有多重。',
     ].join('\n'),
     parameters: {
-      orientation: { type: 'string', description: '"portrait" / "landscape" / "square"（正方形旋转不变，投横屏游戏推荐）。省略按物理屏比例。' },
+      orientation: { type: 'string', description: '"portrait" / "landscape" / "square"。省略（默认 auto）按物理屏比例，最接近真机，推荐不要指定。**square 不推荐**：16:9 的游戏会按高度算出更宽的画布，右边被裁。' },
       hwc: { type: 'string', description: '"auto"（默认）/"on"/"off"。3D 游戏要开。' },
     },
     output: out('新建屏的 screenId、displayId、dpi。'),

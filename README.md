@@ -879,7 +879,7 @@ AI 调 vdisplay_input { kind: "tap", nx: 0.5, ny: 0.9 }
 | **多屏并行被一把全局锁串行化** | 调度层并行，执行层串行（`input/shot/launch/text` 排同一条 mutex） | 「3 个 AI 同时操作 3 个 App 提速 3 倍」现在做不到 |
 | **OCR 缓存只有单槽** | A/B 界面交替时命中率归零 | 交替场景每次都重新识别 |
 | **只在一台机器验证** | nubia NX809J / Android 16 | 其他机型、其他 Android 版本都没测 |
-| **3D 游戏依赖 HWC** | `vds_allow_hwc=0` 的机器仍黑屏 | 先按 4.1 最后一条查 |
+| **3D 游戏依赖 HWC** | `vds_allow_hwc=0` 的机器仍黑屏；**本机（`=1`）2026-11-20 复测 Minecraft 主菜单完整渲染**，证据见 [tests/MEASUREMENTS-2026-11-20.md](tests/MEASUREMENTS-2026-11-20.md) M8 | 先按 4.1 最后一条查 |
 | **framesrv 不自愈** | 进程死了帧就没了，还没做自动重启（看门狗能防它一直烧电，但不能把它救活） | 重开一次推流 |
 | **息屏就断** | 虚拟屏依赖设备保持唤醒；息屏后要人脸/指纹/密码解锁，AI 无法自动恢复 | 正常的点击/滑动会自动重置息屏计时器，任务在跑就不会息屏 |
 | **虚拟屏名字固定 `scrcpy`** | `uniqueId` 里还带 `com.android.shell,2000`；普通 App 的 `getDisplays()` 默认看不到（没有 `FLAG_PUBLIC`），但 `getDisplays(DISPLAY_CATEGORY_PRESENTATION)` **能看到**【推断】 | 见 [LIMITS.md](LIMITS.md) A-02 |

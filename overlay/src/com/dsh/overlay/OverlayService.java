@@ -782,7 +782,10 @@ int dx = (int)(e.getRawX() - downX);
                 // **多窗口时默认小一点**：一份 62% 屏宽，三份叠起来就满了。
                 // 按已有窗口数收缩：1 个 62%，2-3 个 46%，4+ 个 38%。
                 int n = Math.max(1, wins.size());
-                float frac = n <= 1 ? 0.62f : (n <= 3 ? 0.46f : 0.38f);
+                // **单窗口默认 40%，不要 62%。**
+                // 用户反馈：默认建悬浮窗时占了屏幕大半，挡着他看主屏。
+                // 40% 宽在 720p 逻辑宽上约 490px，内容仍看得清，但留出 60% 给用户。
+                float frac = n <= 1 ? 0.40f : (n <= 3 ? 0.34f : 0.28f);
                 w = Math.round(screenW * frac);
                 h = Math.round(w / a);
                 int maxH = Math.round(screenH * (n <= 1 ? 0.55f : 0.34f));

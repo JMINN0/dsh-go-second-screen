@@ -529,7 +529,7 @@ MediaProjection 替代 screencap、多 AI broker 完整版、跨进程租约。
 
 | 工具 | 一句话 |
 |---|---|
-| `vdisplay_start` | 建一块私有虚拟屏，返回 displayId 与能力标志。**默认方形 1080×1080**（旋转不变，投任何 App 都不会横竖冲突）；`orientation` 可选 `square`/`landscape`/`portrait`，`hwc` 控制 3D 渲染 |
+| `vdisplay_start` | 建一块私有虚拟屏，返回 displayId 与能力标志。**默认按物理屏比例**（最接近真机；横屏 App 会把屏转成横屏，镜像自动跟随）；`orientation` 可选 `auto`（默认）/`square`/`landscape`/`portrait`，`hwc` 控制 3D 渲染。**不建议用 square**：16:9 的游戏会按高度算出更宽的画布，右边被裁 |
 | `vdisplay_status` | 屏在不在跑、displayId、上面跑着什么、主屏焦点是什么 |
 | `vdisplay_stop` | 销毁屏并释放 OCR/OpenCV 常驻助手（不关会留孤儿进程） |
 | `screen_keepalive` | 设定「AI 停下多久后自动关屏」，1–360 分钟（默认 5） |
@@ -662,7 +662,7 @@ MediaProjection 替代 screencap、多 AI broker 完整版、跨进程租约。
 ### 7.3 两块屏跑两个 App（多任务）
 
 ```
-1. screen_new { }                              → sd-1（默认方形 1080×1080）
+1. screen_new { }                              → sd-1（默认物理比例 720×1592）
 2. screen_new { orientation: "landscape" }    → sd-2（明确知道要横屏才指定）
 3. screen_use { screenId: "sd-1" }; vdisplay_launch { pkg: "com.tencent.mm" }
 4. screen_use { screenId: "sd-2" }; vdisplay_launch { pkg: "com.android.settings" }
@@ -955,6 +955,24 @@ grep -i "apply failed" "$HOME/.dsh/dsh-app/diagnostics.md"
 | **MJPEG 延迟大** | ① 采集线程里同步写 socket，客户端慢就堵住整条链路；② 两边都没设 `TCP_NODELAY`，每帧三次写被 Nagle 攒包 | 写操作移到独立线程（只保留最新帧，旧的丢弃）+ 两边 `setTcpNoDelay(true)` | 改后用 Node 裸 socket 连 `/stream.mjpg` 计 4 秒：**179 帧 = 均值 44.8fps**，帧间隔**中位 17ms**、p90 33ms（见 §9.1）。**没有 114fps 这回事**，理由见 §9.1 的说明 |
 | **看不到 AI 点了哪里** | 原来画的是十字准星，在深色背景上看不清 | 改成**水滴波纹**：红色实心点 + 白描边 + 3 圈扩散圆环，900ms 淡出；静止画面时由动画线程连推 16 帧 | 中心区红色像素 2406→2677 递增 |
 | **重复 `am start` 起两个 overlay 进程** | `MainActivity` 没有 `launchMode` | 加 `singleTask` + 实现 `onNewIntent`（否则 `--ez stop` 会被静默丢弃） | 进程数恒为 1 |
+
+## 十·六、2026-11-20 晚：镜像与方向
+
+同一天晚些时候又修了三处，都是「实际用起来才暴露」的：
+
+| 问题 | 根因 | 怎么发现的 |
+|---|---|---|
+| **悬浮窗里显示的是用户主屏，不是后台屏** | `createVirtualDisplay` 的第 4 个参数是 `displayIdToMirror`。我为了「修 dpi」把它改成了 dpi 值 → 镜像一个不存在的屏 → **框架静默回退到 display 0** | 用户自己看出来「这怎么是我们的对话」。用「帧 vs 主屏截图」比像素差确认：修前 6.1（就是同一画面），修后 156.8 |
+| **横屏游戏画面被裁/挤成一条** | 虚拟屏带 `FLAG_ROTATES_WITH_CONTENT`，App 强制横屏时屏的**逻辑尺寸**会从 720×1592 变成 1592×720；而取帧服务的 ImageReader 尺寸建的时候定死，不跟着变 → 横屏内容被等比缩进竖屏缓冲，只占顶部约 20% | 用户截图：弹窗文字「请尝试」被切掉「试」之后所有字 |
+| **MJPEG 客户端冻在第一帧** | 重构把镜像创建抽成 `openMirror()` 时，把 `startWriter()` 的调用一起删了 → `pendingJpg` 只写不读。`/frame.jpg` 读的是另一个字段所以照常工作，只有走 MJPEG 的悬浮窗会冻 | 对抗审查子代理 grep 调用点发现。**我自己的测试只看了 `/frame.jpg`，所以没发现** |
+
+**三条经验**：
+
+1. **镜像指错屏不会报任何错** —— 不崩溃、帧数照涨、画面在动，只是内容错了。最便宜的验证是「拿帧和主屏截图比像素差」。
+2. **屏会转，镜像不会自己转** —— 现在有 1 秒轮询 + 连续两次确认 + 1.5 秒限速的看门狗，转屏后最多约 3.5 秒跟上。
+3. **`/frame.jpg` 能看不代表 MJPEG 能用** —— 两条路读的是不同字段，测试要覆盖悬浮窗实际走的那条。
+
+**关于正方形**：一度被设成默认（想靠「旋转不变」绕开方向问题），后来推翻了 —— 游戏不按屏的比例排版，它按自己的目标比例算画布。1080×1080 的方屏投 16:9 游戏，游戏按高度算出宽 1920，屏只有 1080，右边裁掉 840px。**方屏是放大这个问题，不是解决它。** 现在默认是物理屏比例。
 
 ## 十一、和现有方案对比
 

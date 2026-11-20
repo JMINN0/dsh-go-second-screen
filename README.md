@@ -1,6 +1,6 @@
 # 后台屏 · 让 AI 操控安卓手机，但不抢你的屏幕
 
-**一句话**：这台工具给 AI 在安卓手机上开一块**你完全看不见的虚拟屏**（Android `VirtualDisplay`），
+**一句话**：这个项目给 AI 在安卓手机上开一块**你完全看不见的虚拟屏**（Android `VirtualDisplay`），
 AI 在那块屏上跑 App、点按钮、读文字、玩游戏，你的主屏、输入法、前台应用**一次都不被打断**。
 
 这件事解决的是「**AI 操控手机（computer use）时，人和 AI 抢同一块屏幕**」这个问题 ——
@@ -76,7 +76,7 @@ Display 0（你的屏）          VirtualDisplay（AI 的屏）
 ```
 
 **这是 Android 显示子系统自身的能力，不是外挂、不是 hook、不注入别人进程。**
-所以它不需要 root，也不会被「改机/注入/重打包」那类检测命中（详见第十四节 FAQ 与 [LIMITS.md](LIMITS.md)）。
+所以它不需要 root，也不会被「改机/注入/重打包」那类检测命中（详见第十二节 FAQ 与 [LIMITS.md](LIMITS.md)）。
 
 ---
 
@@ -169,7 +169,7 @@ vdisplayd（常驻守护进程，握着虚拟屏）
 | scrcpy 的 H.264 视频流 | **34.3fps**（29ms） | 411 帧 / 12 秒，但需要解码 |
 | **ImageReader（本项目快路径）** | **15ms**（67fps） | 从合成器直接拿 buffer，**没有回读开销** |
 
-做法是写一个 200 行的 Java 程序（`framesrv/src/.../Main.java`），用 `app_process` 跑起来：
+做法是写一个 Java 程序（`framesrv/src/com/dsh/framesrv/Main.java`，600 行），用 `app_process` 跑起来：
 反射调 `DisplayManager.createVirtualDisplay()`，把虚拟屏**镜像进一个 `ImageReader`**，
 自己在进程内起一个 HTTP server 吐 JPEG：
 
@@ -217,8 +217,34 @@ ADDVIEW_ERR IllegalStateException: Unknown pid=19074 uid=2000
 `app_process` 从 adb shell 起、不是 zygote fork 的应用进程 → `Unknown pid` → 拒绝。
 **这不是权限问题**（shell 本来就有 `SYSTEM_ALERT_WINDOW: granted=true`），是**进程身份**问题。
 
-所以做了个 16KB 的 APK，但**用户不用手动装**：APK 就在 `screen/assets/overlay/ai-overlay.apk`，
+所以做了个 24KB 的 APK，但**用户不用手动装**：APK 就在 `screen/assets/overlay/ai-overlay.apk`，
 第一次用推流时插件自动 push → install → `appops set SYSTEM_ALERT_WINDOW allow` → 启动（实测 1094ms）。
+
+---
+
+## 三·五、安装入口只有一个：`screen/`（别装仓库根）
+
+**实测结论**（2026-11-20）：
+
+| 装什么 | `dsh plugin add` 能装吗 | 会激活插件吗 |
+|---|---|---|
+| 仓库根 `dsh-go-second-screen` | ✅ 能装成依赖 | ❌ **不激活**，profile 里不会多出条目 |
+| `screen/` 子目录 | ✅ 能装 | ✅ **会激活**，工具真正出现 |
+| `web/` 子目录 | ✅ 能装 | ✅ 会激活 |
+| `watch/` 子目录 | ✅ 能装 | ✅ 会激活（但要先拷到 `$DSH_HOME/dsh-go/plugins/`）|
+
+所以正确的装法是：
+
+```bash
+dsh plugin --profile web add ./screen      # 后台屏，必需
+dsh plugin --profile web add ./web         # 浏览器控制，可选
+```
+
+**为什么仓库根装了不激活**：根的 `package.json` 里 `dsh.bundle.patch` 指到 `./screen/cordis.patch.yml`，
+但 `dsh plugin add` 只把它当 pnpm 依赖写进 `package.json`，patch 不会被应用。
+根 package.json 存在的意义是「让扫描工具认得出这是个 DSH 插件仓库」，不是安装入口。
+
+> 装完必须**重启引擎**。MCP 工具是引擎启动时加载的，不重启看不到。
 
 ---
 
@@ -264,10 +290,23 @@ adb -s 127.0.0.1:5555 shell getprop vendor.display.vds_allow_hwc
 # 1 = 硬件支持 HWC，插件会自动开；0 或空 = 3D 游戏会黑屏
 ```
 
-> **连不上 adb 怎么办**：回环 5555 不是 adbd 的默认监听端口，冷启动要走「无线调试 → 配对 →
-> `adb tcpip 5555` → `adb connect 127.0.0.1:5555`」这套顺序，详见
-> [dsh-go-plugin-adb](https://github.com/JMINN0/dsh-go-plugin-adb)。
-> **注意**：`adb tcpip 5555` 会重启 adbd，正在用 adb 的其他工具（包括 Shizuku 的连接）会断。
+> **连不上 adb 怎么办**：回环 5555 不是 adbd 的默认监听端口，第一次必须先配对。完整流程：
+>
+> ```bash
+> # 手机端先做（这两步只能人来点）：
+> #   设置 → 关于手机 → 连点「版本号」7 次，打开开发者选项
+> #   开发者选项 → 无线调试 → 打开 → 「使用配对码配对设备」，记下配对端口和 6 位码
+>
+> adb pair 192.168.1.100:37123      # 换成手机上显示的 IP:配对端口，然后输 6 位码
+> adb connect 192.168.1.100:41000   # 换成无线调试主页显示的 IP:端口（和配对端口不是同一个）
+> adb tcpip 5555                    # 把 adbd 切到固定端口
+> adb connect 127.0.0.1:5555        # 之后只用这条回环连接
+> adb -s 127.0.0.1:5555 shell echo ok
+> ```
+>
+> 配对成功后**回环连接关 WiFi、开飞行模式都不受影响**；手机重启后要重做一次 `adb tcpip 5555`。
+> 更细的排障见 [dsh-go-plugin-adb](https://github.com/JMINN0/dsh-go-plugin-adb)。
+> **注意**：`adb tcpip 5555` 会重启 adbd，正在用 adb 的其他工具（包括 Shizuku 的连接）会断**一次**。
 > 已经配好回环的设备**不要重复执行**。
 
 ### 4.2 克隆与依赖
@@ -340,7 +379,7 @@ App 内：**设置 → 引擎 → 重启引擎**。不重启，新工具不会�
 ### 4.5 验证
 
 ```bash
-# ① 包进 profile 了吗
+# ① 包进 profile 了吗（如果设了 DSH_HOME，把 $HOME/.dsh 换成它）
 python3 -c "
 import json
 d = json.load(open('$HOME/.dsh/profiles/web/package.json'))
@@ -369,8 +408,12 @@ node screen/bin/vdisplay.mjs input tap --nx 0.5 --ny 0.9
 node screen/bin/vdisplay.mjs stop
 ```
 
-装到 PATH 之后可以省掉 `node screen/bin/`：`npm link ./screen`，
-或者 `alias vdisplay="node /root/workspace/dsh-go-second-screen/screen/bin/vdisplay.mjs"`。
+装到 PATH 之后可以省掉 `node screen/bin/`：`npm link ./screen`（会装 `vdisplay` 到全局，**【推断】** 按
+`package.json` 的 `bin` 字段应该可行，我没在本机验证过），或者用别名：
+
+```bash
+alias vdisplay="node /root/workspace/dsh-go-second-screen/screen/bin/vdisplay.mjs"
+```
 
 **给别的 agent 宿主（MCP）**：
 
@@ -419,7 +462,7 @@ adb -s 127.0.0.1:5555 uninstall com.dsh.overlay
 
 | 能力 | 实测证据 |
 |---|---|
-| 操作 3D 游戏，而且是**连续控制** | Minecraft 从建世界到进游戏全程 5 步命中；60Hz 虚拟摇杆驱动角色走路。受控对比：静置 1.5 秒画面差异 **0.64**，摇杆 2.5 秒后 **11.69**（**18 倍**）。游戏内 47–60fps |
+| 操作 3D 游戏，而且是**连续控制** | Minecraft 从建世界到进游戏全程 5 步命中；60Hz 虚拟摇杆驱动角色走路。受控对比：静置 1.5 秒画面差异 **0.64**，摇杆 2.5 秒后 **11.69**（**18 倍**）。游戏内 47–60fps。【实测·报告】记录在提交说明里；`tests/MC-OPERATION-TEST.md` 是 11-17 的中间状态，里面「走路」还标着未测，以提交记录为准 |
 | 视频画面能抓，而且有更省的办法 | 三次实测：scrcpy 流 411 帧/12 秒 = **34.3fps**；`screencap -d` ≈7fps；ImageReader **67–76fps**。但绕开它更简单 —— App 缓存的视频是标准 MP4，直接 pull 出来 ffmpeg 读（`bin/vidgrab.mjs`）：`hevc 1280×720 + aac，29.98 秒`，抽帧 + 抽音频，**只读、秒级** |
 | 网页登录、填表、点按钮 | 走 CDP，读 DOM 而不是看截图；React/Vue 能收到逐字符按键事件 |
 | 双屏并存 | 两块虚拟屏同时跑不同 App，各有独立推流与悬浮窗（`screen_pool` / `screen_new` / `screen_use`） |
@@ -428,7 +471,7 @@ adb -s 127.0.0.1:5555 uninstall com.dsh.overlay
 
 ### 5.2 做不到（不是 bug）
 
-摘要，完整 56 条见 **[LIMITS.md](LIMITS.md)**（按「为什么做不到」分 A–E 五类，每条带证据来源）。
+摘要，完整 **25 条**见 **[LIMITS.md](LIMITS.md)**（按「为什么做不到」分 A–E 五类，每条带证据来源）。
 
 | 做不到 | 原因 | 证据等级 |
 |---|---|---|
@@ -678,60 +721,53 @@ node /root/workspace/dsh-go-second-screen/screen/bin/vdisplay.mjs --json status
 ### 8.1 两块屏的资源隔离
 
 ```
-┌─────────────────────────── 一台手机（无 root）───────────────────────────┐
-│                                                                          │
-│   Display 0（物理屏）                  VirtualDisplay（后台屏）            │
-│   ┌──────────────────────┐            ┌──────────────────────┐           │
-│   │ 你正在用的 App        │            │ AI 投上去的 App       │           │
-│   │ 微信 / B站 / 游戏     │            │ 小红书 / 设置 / MC    │           │
-│   │                      │            │                      │           │
-│   │ 自己的窗口栈          │            │ 自己的窗口栈          │           │
-│   │ 焦点 ← 你的输入框      │            │ 焦点 ← AI 的注入事件   │           │
-│   │ 输入法 ← 你打字        │            │ 输入法：不弹（hide）   │           │
-│   └──────────────────────┘            └──────────────────────┘           │
-│        ▲ 不共享焦点、不共享输入法              ▲ 没有 FLAG_PUBLIC          │
-│        │ 不共享图层                          │ 不画到任何物理面板上        │
-└────────┼────────────────────────────────────┼────────────────────────────┘
-         │                                    │
-         │ 人手                               │ AI（adb / 插件工具）
-         ▼                                    ▼
+┌ Display 0（物理屏） ───────┐  ┌ 后台屏 VirtualDisplay ─────┐
+│ 你正在用的 App             │  │ AI 投上去的 App            │
+│ 微信 / B站 / 游戏          │  │ 小红书 / 设置 / MC         │
+│                            │  │                            │
+│ 自己的窗口栈               │  │ 自己的窗口栈               │
+│ 焦点 ← 你的输入框          │  │ 焦点 ← AI 的注入事件       │
+│ 输入法 ← 你打字            │  │ 输入法：不弹（hide）       │
+└────────────────────────────┘  └────────────────────────────┘
+   ▲ 焦点、输入法、图层都留在这边 ▲ 没有 FLAG_PUBLIC，不画到任何物理面板上
+   │ 你看得见、摸得着             │ AI 用 adb / 插件工具操作它
+   你（人手）                     AI（Agent）
 ```
 
 ### 8.2 进程与数据链路
 
 ```
-┌────────────────────────── DSH 引擎（Node，proot 里）──────────────────────────┐
-│                                                                               │
-│  screen 插件（39 工具）            web 插件（10 工具）                          │
-│  ├─ vd.js      建屏/注入/截图      ├─ adb forward tcp:<随机>                    │
-│  ├─ pool.js    多屏池 + dpi 金丝雀  │   localabstract:chrome_devtools_remote   │
-│  ├─ lease.js   占用租约            └─ CDP over WebSocket ──┐                    │
-│  ├─ ocr.js     ──┐                                        │                    │
-│  ├─ vision.js  ──┼─> python3 常驻助手（OCR 15MB / OpenCV）  │                    │
-│  ├─ framesrv.js ──┐                                       │                    │
-│  └─ stream.js   ──┤                                       │                    │
-└───────────────────┼───────────────────────────────────────┼────────────────────┘
-                    │ adb shell                             │ 浏览器进程
-                    ▼                                       ▼
-   ┌───────────────────────────────────┐        ┌────────────────────────┐
-   │ /data/local/tmp/dshvd/            │        │ Edge / Chrome          │
-   │   scrcpy-server.jar (uid 2000)    │        │ DevTools socket        │
-   │     └─ new_display → VirtualDisplay│       └────────────────────────┘
-   │                                    │
-   │ /data/local/tmp/dshframe/         │
-   │   frame.dex (app_process)         │
-   │     ImageReader ← 镜像虚拟屏        │
-   │     自己 serve HTTP :38820 ────────┼──┐
-   └───────────────────────────────────┘  │  /frame.jpg /status /stream.mjpg
-                                          │
-   ┌──────────────────────────────────────┼───────────────────────────────────┐
-   │ 用户能看到的两个入口                    │                                   │
-   │                                      ▼                                   │
-   │   悬浮窗 APK（com.dsh.overlay）      原生插件 watch（胶囊 + 「AI 画面」面板）│
-   │   TYPE_APPLICATION_OVERLAY           composer.strip + panels             │
-   │   FLAG_NOT_FOCUSABLE ← 不抢焦点       点一下能看到实时画面                  │
-   │   落点画水滴波纹（900ms 扩散淡出）                                        │
-   └──────────────────────────────────────────────────────────────────────────┘
+DSH 引擎（Node，跑在 proot 的 Ubuntu 里）
+├── screen 插件（39 个工具）
+│   ├── vd.js         建屏 / 注入 / 截图 / 页面探测
+│   ├── pool.js       多屏池 + dpi 金丝雀（靠 dpi 320+i 分辨哪块屏是哪块）
+│   ├── lease.js      占用租约（五级占用 + 抢占 + 默认不抢）
+│   ├── ocr.js    ─┐
+│   ├── vision.js ─┴──> python3 常驻助手（OCR 15MB / OpenCV 80-150MB）
+│   ├── framesrv.js ─┐
+│   └── stream.js   ─┴──> 取帧与推流的管理层
+└── web 插件（10 个工具）
+    └── adb forward tcp:<随机端口> ──> 浏览器 DevTools socket（CDP over WebSocket）
+
+            │ adb shell（uid 2000）
+            ▼
+
+手机侧（uid 2000，无 root）
+├── /data/local/tmp/dshvd/scrcpy-server.jar
+│   └── new_display ──> VirtualDisplay（AI 那块屏，没有 FLAG_PUBLIC）
+└── /data/local/tmp/dshframe/frame.dex（app_process）
+    ├── ImageReader ← 镜像上面那块 VirtualDisplay
+    └── 自己当 HTTP server :38820  →  /frame.jpg  /status  /stream.mjpg
+
+            │ HTTP（悬浮窗直连它，链路里没有 Node 中转）
+            ▼
+
+用户能看到的两个入口
+├── 悬浮窗 APK（com.dsh.overlay，24KB，插件自动装）
+│   TYPE_APPLICATION_OVERLAY + FLAG_NOT_FOCUSABLE → 浮在任何 App 上但不抢焦点
+│   落点画水滴波纹（900ms 扩散淡出），能看出点没点偏
+└── 原生插件 watch（Cordis 之外的那一半）
+    输入框上方胶囊「AI 未操作」+ 点开的「AI 画面」面板
 ```
 
 ### 8.3 一次点击的完整往返
@@ -763,16 +799,17 @@ AI 调 vdisplay_input { kind: "tap", nx: 0.5, ny: 0.9 }
 | screencap 全流程 | **227–243ms**（2.5fps） | 141ms 回读 + 98ms PNG + 71ms 传输 | 【实测】 |
 | ImageReader 镜像，静态屏 | 4 秒 **1 帧** | 事件驱动，不变化不出帧 | 【实测】 |
 | ImageReader 镜像，动态内容 | **269 帧 / 4 秒 = 67fps，15ms/帧** | 131 行探针程序（`tests/IMAGEREADER-PROBE.md`） | 【实测】 |
-| framesrv 常驻服务 | **76fps**（静止页轮询）；滚动 App 时 **159 帧 / 4.8 秒 = 33fps** | `/status` 的 frames 与 fps | 【实测·报告】 |
+| framesrv 常驻服务 | **76fps**（单次采样，服务自报）；滚动 App 时 **159 帧 / 4.8 秒 = 33fps** | `/status` 的 frames 与 fps | 【实测·报告】 |
 | MJPEG 输出（悬浮窗） | **179 帧 / 4 秒**（均值 44.8fps），帧间隔**中位 17ms**，p90 33ms | 4 秒计时 + 帧计数（commit `2aa1ea0`） | 【实测】 |
 | scrcpy H.264 视频流 | **411 帧 / 12 秒 = 34.3fps** | 视频流帧计数 | 【实测】 |
 | 悬浮窗解码上限 | 1 窗口 30fps；2–3 窗口 15fps；4+ 窗口 8fps | 代码常量 | 【实测·源码】 |
 | 推流（`vdisplay_stream`） | 2fps / 360 宽，约 **0.30 核、29KB/s** | top + 抓包 | 【实测】 |
 
-> **关于「114fps」**：仓库里没有这个数字。能查到的最接近的是
-> ① 17ms 的帧间隔中位（就是上表那行，对应瞬时 59fps、4 秒均值 44.8fps）；
-> ② `119fps` —— 但那是**一个 bug 的读数**：虚拟屏已经死了、framesrv 还在对一片空白疯狂编码。
-> 写文档时不要用 114fps 这个数。
+> **关于「114fps」**：这个数字出现在仓库的 `llms.txt` 里（写着「53-114fps」），**但没有任何一次测量支持它**。
+> 能查到的是：① 17ms 的帧间隔中位（就是上表那行，对应瞬时 59fps、4 秒均值 44.8fps）；
+> ② `53.7fps` —— 那是「没客户端时也在编码」那段时间的编码速率，是审计出来的**浪费**，不是交付帧率；
+> ③ `119fps` —— 那是**一个 bug 的读数**：虚拟屏已经死了、framesrv 还在对一片空白疯狂编码。
+> 写文档、做容量规划时不要用 114fps。`llms.txt` 里的那一行**还没改**，别引用它。
 
 ### 9.2 感知与操作
 
@@ -836,6 +873,7 @@ AI 调 vdisplay_input { kind: "tap", nx: 0.5, ny: 0.9 }
 | **息屏就断** | 虚拟屏依赖设备保持唤醒；息屏后要人脸/指纹/密码解锁，AI 无法自动恢复 | 正常的点击/滑动会自动重置息屏计时器，任务在跑就不会息屏 |
 | **虚拟屏名字固定 `scrcpy`** | `uniqueId` 里还带 `com.android.shell,2000`；普通 App 的 `getDisplays()` 默认看不到（没有 `FLAG_PUBLIC`），但 `getDisplays(DISPLAY_CATEGORY_PRESENTATION)` **能看到**【推断】 | 见 [LIMITS.md](LIMITS.md) A-02 |
 | **同一 `singleTask` App 不能双开** | 强行 `am start --display` 会把主屏任务搬走（破坏性） | 多屏时换不同 App |
+| **文档之间互相矛盾** | ① `LIMITS.md` A-02 列这块屏的 flags 时**没有** `FLAG_OWN_CONTENT_ONLY` / `FLAG_OWN_FOCUS`，而 `screen/src/vd.js` 与 `screen/README.md` 说这两个是判据 —— 两处描述的可能是不同的 flags 集合，**我没核对 AOSP 源码，所以是【推断】**；② `llms.txt` 写「取帧 53-114fps」，见 9.1 的说明；③ `screen/README.md` 说「八个工具」、`web/README.md` 说「工具数 8」，实际是 39 和 10 | 读数之前先看本节和 9.1 |
 
 ### 10.2 排查手册
 
@@ -1078,7 +1116,10 @@ grep -i "apply failed" "$HOME/.dsh/dsh-app/diagnostics.md"
 |---|---|---|
 | [docs/OPERATION-PLAYBOOK.md](docs/OPERATION-PLAYBOOK.md) | 拿到一个操作目标，10 秒内判断「能不能做、用什么做、什么时候必须停」。六级风控分类、十二种操作手段、决策树、四个必须停的硬条件、拟人化参数、反面案例库 | **每次操作前** |
 | [OPERATION-PRIORITY.md](OPERATION-PRIORITY.md) | 按「对用户的打扰成本」排的四级优先级：后台+命令 → 后台+注入 → 前台+命令 → 前台+注入。以及抢了前台怎么还原 | 要动前台之前 |
-| [LIMITS.md](LIMITS.md) | **做不到什么**，56 条，按原因分 A–E 五类，每条带证据来源 | 想放弃某个方案之前 |
+| [LIMITS.md](LIMITS.md) | **做不到什么**，**25 条**（A-01…E-03），按原因分 A–E 五类，每条带证据来源 | 想放弃某个方案之前 |
+| [llms.txt](llms.txt) | 一页速览，给把文档塞进上下文用的 AI 宿主 | 上下文不够时 |
+| [AGENTS.md](AGENTS.md) | 给编码助手读的短版说明（Codex / Cursor / Claude Code 会原生读这个名字）。**其中有两处已经过时**：① 它说 `SET_CLIPBOARD`+`KEYCODE_PASTE` 打不进中文 —— 实测能打进（见 10.1 的「打字只对部分 App 有效」与 FAQ 12）；② 里面的工具名写成 `mcp__phone__vdisplay_start`，实际是 `vdisplay_start` | 用编码助手接这个仓库时 |
+| [tools/fetch-sdk.sh](tools/fetch-sdk.sh) | 下载编译依赖（`android-30.jar` 等 37MB，不在 git 里）。只有要从源码重编 APK/dex 时才需要 | 要改悬浮窗或取帧服务时 |
 | [tests/](tests/) | 1500+ 行实测记录，含我判断错了、后来自己推翻的地方 | 想知道某个数字怎么来的 |
 | [tests/risk-sim/FULL-REPORT.md](tests/risk-sim/FULL-REPORT.md) | 六个本地靶场的完整实测 | 关心风控之前 |
 | [BROKER-DESIGN.md](BROKER-DESIGN.md) | 多 AI 多屏的架构设计（**代码未实现那部分是设计**） | 要做多 Agent 之前 |

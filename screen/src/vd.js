@@ -403,7 +403,7 @@ export function setActive(ctx) {
 export function newContext() { return makeState(); }
 
 /** 建一块私有虚拟屏。返回 {ok, displayId, sfId} */
-export async function start({ width = 0, height = 0, dpi = 320, systemDecorations = false, orientation = 'square', hwc = 'auto', maxFps = 60, imePolicy = 'hide' } = {}) {
+export async function start({ width = 0, height = 0, dpi = 320, systemDecorations = false, orientation = 'auto', hwc = 'auto', maxFps = 60, imePolicy = 'hide' } = {}) {
   // 记下调用方有没有显式传尺寸 —— square 分支靠它决定用默认值还是尊重传入值
   const explicitSize = width > 0 && height > 0;
 

@@ -326,12 +326,27 @@ public class OverlayService extends Service {
         } catch (Throwable t) { /* ignore */ }
         return sh - dp(96) - ins;
     }
-    /** 进圈半径。 */
-    private int hubR() { return dp(76); }
+    /** 进圈半径 = 视觉半径 + 一点手指容错。
+     *
+     *  **这是「触碰位置跟 UI 有差别」的头号原因。**
+     *  圈视觉直径 dp(56) → 半径 dp(28)=91px；原来这里写 dp(76)=247px，
+     *  等于用户离圈边还有 156px 就被判成「进圈」了，2.7 倍的偏差。
+     *  现在 = 视觉半径 + dp(8) 容错 = dp(36)。
+     */
+    private int hubR() { return dp(36); }
     /** 水平带半高：离开这个范围按钮就消失。 */
     private int hubBand() { return dp(120); }
-    /** 左/右按钮窗口宽度。 */
-    private int barW() { return dp(168); }
+    /** 左/右按钮窗口宽度。
+     *
+     *  原来是 dp(168)=546px，占屏宽 **45%**，两条加起来 90%，中间只剩 10% 空隙 ——
+     *  而且左条的命中区一路延伸到屏幕中心，**人站在圆圈上就已经算「选中左」**，
+     *  一松手就删。这是最致命的一条。
+     *  现在 dp(120)=390px（32%），两条 64%，中间留 36% 的空档放圆圈。
+     */
+    private int barW() { return dp(120); }
+
+    /** 按钮命中容差：只给一点手指误差，不许溢出视觉区太多。 */
+    private int barPad() { return dp(8); }
 
     /** 造一个 Apple/SpaceX 质感的胶囊：深近黑底、极细描边、圆角。 */
     private GradientDrawable pill(int accent, boolean filled) {
@@ -375,9 +390,8 @@ public class OverlayService extends Service {
         rg.setStroke(dp(1), 0x40FFFFFF);
         ring.setBackground(rg);
         hub.addView(ring, new android.widget.LinearLayout.LayoutParams(dp(56), dp(56)));
-        TextView hx = new TextView(this);
-        hx.setText("");
-        hub.addView(hx, new android.widget.LinearLayout.LayoutParams(dp(1), dp(0)));
+        /* 原来这里还塞了一个 1dp 高的 TextView，导致内容 57dp > 窗口 56dp 被裁，
+         * 视觉中心偏半像素。去掉，窗口和内容都严格 dp(56)。 */
         hubView = hub;
         hubLp = new WindowManager.LayoutParams(dp(56), dp(56), type, flags,
                 android.graphics.PixelFormat.TRANSLUCENT);
@@ -444,16 +458,30 @@ public class OverlayService extends Service {
 
     private void hideRail() { setDropState(0); }
 
-    /** 手指是否在左按钮区域。 */
-    private boolean onLeftBar(float x, float y) {
-        int cx = dp(12) + barW() / 2;
-        return Math.abs(x - cx) < barW() / 2 + dp(24) && Math.abs(y - hubCy()) < dp(56);
+    /** 左按钮的**视觉**矩形（和 LayoutParams 必须一致）。 */
+    private int[] leftBarRect() {
+        int l = dp(12), t = hubCy() - dp(23);
+        return new int[] { l, t, l + barW(), t + dp(46) };
     }
-    /** 手指是否在右按钮区域。 */
-    private boolean onRightBar(float x, float y) {
+    /** 右按钮的**视觉**矩形。 */
+    private int[] rightBarRect() {
         int sw = getResources().getDisplayMetrics().widthPixels;
-        int cx = sw - dp(12) - barW() / 2;
-        return Math.abs(x - cx) < barW() / 2 + dp(24) && Math.abs(y - hubCy()) < dp(56);
+        int r = sw - dp(12), t = hubCy() - dp(23);
+        return new int[] { r - barW(), t, r, t + dp(46) };
+    }
+
+    /** 手指是否在左按钮上：**严格按视觉矩形 + barPad 容错**。
+     *  绝不允许命中区延伸到屏幕中间 —— 那会让「站在圆圈上」被误判成「选中左」。 */
+    private boolean onLeftBar(float x, float y) {
+        int[] b = leftBarRect();
+        return x >= b[0] - barPad() && x <= b[2] + barPad()
+                && y >= b[1] - barPad() && y <= b[3] + barPad();
+    }
+    /** 手指是否在右按钮上。 */
+    private boolean onRightBar(float x, float y) {
+        int[] b = rightBarRect();
+        return x >= b[0] - barPad() && x <= b[2] + barPad()
+                && y >= b[1] - barPad() && y <= b[3] + barPad();
     }
     /** 手指是否还在圆圈那一带的水平线附近（离开就藏按钮）。 */
     private boolean inBand(float y) { return Math.abs(y - hubCy()) < hubBand(); }

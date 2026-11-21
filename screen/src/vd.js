@@ -750,7 +750,23 @@ export async function stop({ forceStopApps = false } = {}) {
     for (const pkg of pkgList) {
       // 硬保护：这些包杀了会直接影响用户（DSH 就是当前 App 本身）
       if (/^(io\.github\.ccch1mneyyy\.dsh_app|moe\.shizuku\.)/.test(pkg)) continue;
-      await shell(`am force-stop ${pkg}`);
+      /* **App 已经跑在这块屏上时不要 force-stop。**
+       *
+       * 2026-11-21 事故：隔壁「热成像助手」对话反馈「调用一会摄像头就没了」。
+       * 查 logcat 是 com.jminno.thermal 每 2 分钟被 Force stopping 一次 ——
+       * 因为它每轮迭代都调 vdisplay_launch 想「刷新」屏，而这里无条件 force-stop，
+       * 把正在开相机的进程杀了。相机客户端跟着 cameraserver 一起断。
+       *
+       * force-stop 的初衷是防止「App 已在主屏后台 → am start --display 只把主屏任务
+       * 拉过来」那个坑。但如果它已经在那块虚拟屏上跑着，这个担心不成立，
+       * 直接 reuse 反而更安全（也保住了它的相机/连接/进度）。
+       */
+      const _onVd = await shell(`dumpsys window displays 2>/dev/null | grep -A30 "mDisplayId=${state.displayId}" | grep -c "${pkg}"`);
+      const _alreadyThere = Number(String(_onVd).trim()) > 0;
+      if (!_alreadyThere) {
+        await shell(`am force-stop ${pkg}`);
+        await sleep(600);
+      }
       killed.push(pkg);
     }
   }
@@ -995,9 +1011,24 @@ export async function launch(pkg, activity) {
 
   const mainBefore = await mainFocus();
 
-  await shell(`am force-stop ${pkg}`);
+  /* **App 已经跑在这块虚拟屏上时不要 force-stop。**
+   *
+   * 2026-11-21 「热成像助手」对话反馈「调用一会摄像头就没了」：
+   * logcat 显示 com.jminno.thermal 每约 2 分钟被 Force stopping 一次，
+   * 因为它每轮迭代都调 launch 想刷新屏，而这里无条件 force-stop，
+   * 把正在开相机的进程杀了，相机客户端跟着断。
+   *
+   * 原注释担心的坑是「App 已在主屏后台 → am start --display 只拉主屏任务」，
+   * 但它如果已经在那块屏上跑着，这个担心不成立；reuse 反而保住了
+   * 它的相机、连接和进度。
+   */
+  const _onVdL = await shell(`dumpsys window displays 2>/dev/null | grep -A30 "mDisplayId=${state.displayId}" | grep -c "${pkg}"`);
+  const _alreadyOnDisplay = Number(String(_onVdL).trim()) > 0;
+  if (!_alreadyOnDisplay) {
+    await shell(`am force-stop ${pkg}`);
+    await sleep(600);
+  }
   if (!state.launchedPkgs.includes(pkg)) state.launchedPkgs.push(pkg);
-  await sleep(600);
 
   // 省略 activity 时不能只写 `-n <pkg>`——实测报 Bad component name。
   // 先用 resolve-activity 查出默认入口，查不到再退回 monkey 的 launcher intent。

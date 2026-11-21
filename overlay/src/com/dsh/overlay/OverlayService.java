@@ -982,9 +982,16 @@ int dx = (int)(e.getRawX() - downX);
            */
           void refreshLabel() {
               if (label == null) return;
-              String om = collapsed ? "" : readOpMode();
-              String base = "屏 " + port;
-              label.setText(om.isEmpty() ? base : base + " · " + om);
+              String lv = readRiskLevel();
+              if (lv.isEmpty()) {
+                  // 没拿到等级就只显示屏号，不显示任何看不懂的字符串
+                  label.setText("屏 " + port);
+                  label.setTextColor(0xCCFFFFFF);
+                  return;
+              }
+              String w = levelWord(lv);
+              label.setText(collapsed ? lv : (w.isEmpty() ? lv : lv + " " + w));
+              label.setTextColor(levelColor(lv));
           }
 
         void showJpeg(byte[] jpg) {
@@ -1103,18 +1110,51 @@ int dx = (int)(e.getRawX() - downX);
      *
      *  格式：`L2|拟人化|vdisplay_tap_text` 或简写 `L2|vdisplay_tap_text`
      */
-    static String readOpMode() {
+    static String readRiskLevel() {
         java.io.BufferedReader r = null;
         try {
             r = new java.io.BufferedReader(new java.io.FileReader("/data/local/tmp/dshframe/opmode"));
             String line = r.readLine();
             if (line == null) return "";
             line = line.trim();
-            return line.length() > 64 ? line.substring(0, 64) : line;
+            /* 只认 `L0`..`L5` 这种两字符开关。
+             * 2026-11-21 用户反馈：之前那行是「屏 38820 · 注入·tap」，一堆看不懂的，
+             * 唯一有意义的是风控等级。所以这里只取等级，别的全部丢掉。 */
+            if (line.length() >= 2 && (line.charAt(0) == 'L' || line.charAt(0) == 'l')
+                    && Character.isDigit(line.charAt(1))) {
+                return "L" + line.charAt(1);
+            }
+            return "";
         } catch (Throwable t) {
             return "";
         } finally {
             try { if (r != null) r.close(); } catch (Throwable t) { /* ignore */ }
+        }
+    }
+
+    /** 等级 → 中文短词。用户要能一眼看懂这一档意味着什么。 */
+    static String levelWord(String lv) {
+        switch (lv) {
+            case "L0": return "自由";
+            case "L1": return "控频";
+            case "L2": return "拟人";
+            case "L3": return "只读";
+            case "L4": return "人工";
+            case "L5": return "不可";
+            default:   return "";
+        }
+    }
+
+    /** 等级 → 颜色。越高越红，用户不用读字就知道危险程度。 */
+    static int levelColor(String lv) {
+        switch (lv) {
+            case "L0": return 0xFF34D399;   // 绿
+            case "L1": return 0xFFA3E635;   // 黄绿
+            case "L2": return 0xFFFACC15;   // 黄
+            case "L3": return 0xFFFB923C;   // 橙
+            case "L4": return 0xFFEF4444;   // 红
+            case "L5": return 0xFFDC2626;   // 深红
+            default:   return 0xFFFFFFFF;
         }
     }
 

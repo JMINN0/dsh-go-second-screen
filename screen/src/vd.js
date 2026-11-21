@@ -1613,6 +1613,57 @@ async function frameHash() {
  *  为什么要给用户看：风控等级越高，能用的操作就越朴素（越要拟人化）。
  *  用户看得见当前在哪一档，才知道为什么这一步慢了、为什么不直接点。
  */
+let _riskCache = { at: 0, pkg: '', lv: '' };
+
+/** 读 docs/risk.json，返回某包的风控等级（0-5）。读不到返回 -1。 */
+async function riskLevelOf(pkg) {
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    for (const rel of ['../docs/risk.json', '../../docs/risk.json']) {
+      try {
+        const d = JSON.parse(await readFile(join(here, rel), 'utf8'));
+        const apps = d.apps || d;
+        const info = apps[pkg];
+        if (info && typeof info.level === 'number') return info.level;
+        return typeof d.unknown_level === 'number' ? d.unknown_level : -1;
+      } catch { /* 试下一个路径 */ }
+    }
+  } catch { /* ignore */ }
+  return -1;
+}
+
+/** 算出后台屏上当前 App 的风控等级，并写进浮窗读的那个文件。
+ *
+ *  为什么只写 `L2` 两个字符：用户 2026-11-21 说浮窗底部那行
+ *  「屏 38820 · 注入·tap」一堆看不懂的，唯一有意义的是风控等级。
+ *  所以这里只输出等级，格式化交给浮窗自己做（它还要按等级上色）。
+ *
+ *  5 秒缓存：一次 dumpsys 约 250ms，每次点击都查会把操作拖慢一倍。
+ *  用户要看的是「当前处在哪一档」，5 秒的滞后完全够。
+ */
+export async function syncRiskLevel() {
+  try {
+    if (Date.now() - _riskCache.at < 5000 && _riskCache.lv) {
+      markOpMode(_riskCache.lv);
+      return _riskCache.lv;
+    }
+    const st = await status();
+    const m = String(st.focusedApp || '').match(/([a-zA-Z][\w.]*\.[\w.]+)\//);
+    const pkg = m ? m[1] : '';
+    let lv = '';
+    if (pkg) {
+      const n = await riskLevelOf(pkg);
+      lv = n >= 0 ? 'L' + n : '';
+    }
+    if (lv) markOpMode(lv);
+    _riskCache = { at: Date.now(), pkg, lv };
+    return lv;
+  } catch { return ''; }
+}
+
 export function markOpMode(text) {
   /* 插件跑在 proot 里，没有设备的 /data/local/tmp，只能通过 adb 写。
    * 用 fire-and-forget：这一步只是为了给用户看状态，不能拖慢真正的操作，
@@ -1625,7 +1676,7 @@ export function markOpMode(text) {
 }
 
 export async function input(kind, a = {}) {
-  try { markOpMode('注入·' + kind); } catch {}
+  try { syncRiskLevel(); } catch { /* 不影响操作 */ }
   const s = await start();
   if (!s.ok) return { ok: false, hint: s.hint };
   const d = state.displayId;

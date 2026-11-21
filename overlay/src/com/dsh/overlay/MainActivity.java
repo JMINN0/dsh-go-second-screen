@@ -54,7 +54,13 @@ public class MainActivity extends Activity {
         // stop=true → 停服务
         if (it != null && it.getBooleanExtra("stop", false)) {
             stopService(new Intent(this, OverlayService.class));
-            Toast.makeText(this, "已停止", Toast.LENGTH_SHORT).show();
+            /* **不弹 Toast。**
+             *
+             * 2026-11-21 用户报：浮窗早就关了，过一会又突然弹一个「已关闭」。
+             * 根因就是这个 Toast —— stop 的 Intent 是异步投递的，
+             * 插件收尾时可能连发几次，每次都会拉起一个隐藏的 Activity 弹一次提示。
+             * 而用户关窗后看到的画面消失，本身就是最好的反馈，这句提示纯属噪音。
+             */
             finish();
             return;
         }

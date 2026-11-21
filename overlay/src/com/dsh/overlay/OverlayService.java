@@ -321,6 +321,16 @@ public class OverlayService extends Service {
      *  现在改成：进过圈就锁住，直到松手/取消/离开水平带才清。
      */
     private boolean armedThisGesture = false;
+    /** 窗口实际位置与 lp 请求位置的差（px）。
+     *
+     *  **这是「只有上半部分有反馈」的根因。**
+     *  2026-11-21 用户实测：左右按钮只有上半截能触发。
+     *  推演：若窗口实际渲染比 lp.y 低了约 dp(30)（状态栏 inset），
+     *  视觉条整体下移，而判定矩形还按 lp 那套坐标算 → 视觉条只有上半部分
+     *  落进判定区，下半部分「看得见但按不到」。
+     *  解决：用 getLocationOnScreen() 实测一次，把差值补到判定坐标上。
+     */
+    private int originDX = 0, originDY = 0;
     private int dropState = 0;      // 0=隐藏 1=幽灵(拖动中) 2=已进圈(按钮显示) 3=选中左 4=选中右
 
     /** 圆圈中心：屏幕正下方，抬离导航条。 */
@@ -352,10 +362,10 @@ public class OverlayService extends Service {
      *  一松手就删。这是最致命的一条。
      *  现在 dp(120)=390px（32%），两条 64%，中间留 36% 的空档放圆圈。
      */
-    private int barW() { return dp(120); }
+    private int barW() { return dp(96); }
 
     /** 按钮命中容差：只给一点手指误差，不许溢出视觉区太多。 */
-    private int barPad() { return dp(8); }
+    private int barPad() { return dp(6); }
 
     /** 造一个 Apple/SpaceX 质感的胶囊：深近黑底、极细描边、圆角。 */
     private GradientDrawable pill(int accent, boolean filled) {
@@ -371,10 +381,10 @@ public class OverlayService extends Service {
         TextView t = new TextView(this);
         t.setText(s);
         t.setTextColor(color);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
         t.setLetterSpacing(0.08f);
         t.setGravity(Gravity.CENTER);
-        t.setPadding(dp(10), dp(12), dp(10), dp(12));
+        t.setPadding(dp(4), dp(8), dp(4), dp(8));
         return t;
     }
 
@@ -412,21 +422,21 @@ public class OverlayService extends Service {
         leftLabel = barText("关 闭 浮 窗", 0xE6FFFFFF);
         leftLabel.setBackground(pill(0xFF5E9EFF, false));
         leftBar = leftLabel;
-        leftLp = new WindowManager.LayoutParams(barW(), dp(46), type, flags,
+        leftLp = new WindowManager.LayoutParams(barW(), dp(36), type, flags,
                 android.graphics.PixelFormat.TRANSLUCENT);
         leftLp.gravity = Gravity.TOP | Gravity.START;
-        leftLp.x = dp(12);
-        leftLp.y = hubCy() - dp(23);
+        leftLp.x = dp(4);
+        leftLp.y = hubCy() - dp(18);
 
         // ── 右侧：关浮窗 + 停后台屏 ──
         rightLabel = barText("关闭并停 后台屏", 0xE6FFFFFF);
         rightLabel.setBackground(pill(0xFFFF453A, false));
         rightBar = rightLabel;
-        rightLp = new WindowManager.LayoutParams(barW(), dp(46), type, flags,
+        rightLp = new WindowManager.LayoutParams(barW(), dp(36), type, flags,
                 android.graphics.PixelFormat.TRANSLUCENT);
         rightLp.gravity = Gravity.TOP | Gravity.END;
-        rightLp.x = dp(12);   // gravity=END 时 x 是右边距
-        rightLp.y = hubCy() - dp(23);
+        rightLp.x = dp(4);   // gravity=END 时 x 是右边距
+        rightLp.y = hubCy() - dp(18);
     }
 
     /** **按当前屏幕重新摆三个投放窗口。** 每次 ACTION_DOWN 调一次。
@@ -434,18 +444,45 @@ public class OverlayService extends Service {
      *  为什么不缓存：heightPixels 在 Service 里不稳定（见 ACTION_DOWN 的注释），
      *  缓存的坐标会和现算的命中区脱钩。
      */
+    /** 实测窗口渲染位置与 lp 请求位置的差，用于校正命中坐标。
+     *
+     *  **这是「只有上半部分有反馈」的解药。**
+     *  如果窗口实际渲染比 lp.y 低了一个状态栏高度，视觉条整体下移，
+     *  而判定矩形还按 lp 那套坐标算 → 视觉条只有上半截落进判定区，
+     *  下半截「看得见但按不到」。实测出来补到判定坐标上即可对齐。
+     */
+    private void calibrateOrigin() {
+        try {
+            if (hubView == null || hubLp == null || !hubView.isAttachedToWindow()) return;
+            if (hubView.getWidth() == 0 || hubView.getHeight() == 0) return;
+            int[] loc = new int[2];
+            hubView.getLocationOnScreen(loc);
+            int dx = loc[0] - hubLp.x, dy = loc[1] - hubLp.y;
+            if (Math.abs(dx) > dp(120) || Math.abs(dy) > dp(120)) return;
+            if (dx != originDX || dy != originDY) {
+                originDX = dx; originDY = dy;
+                Log.i(TAG, "原点补偿更新 dx=" + dx + " dy=" + dy);
+            }
+        } catch (Throwable t) { /* ignore */ }
+    }
+
     private void layoutDropViews() {
         if (hubLp == null) return;
         int sw = getResources().getDisplayMetrics().widthPixels;
         int sh = getResources().getDisplayMetrics().heightPixels;
         int cx = sw / 2, cy = sh - dp(96);
         hubLp.x = cx - dp(28);   hubLp.y = cy - dp(28);
-        leftLp.x = dp(12);       leftLp.y = cy - dp(23);
-        rightLp.x = dp(12);      rightLp.y = cy - dp(23);   // gravity=END，x 是右边距
+        leftLp.x = dp(4);        leftLp.y = cy - dp(18);
+        rightLp.x = dp(4);       rightLp.y = cy - dp(18);   // gravity=END，x 是右边距
         if (hubShown) {
             try { wm.updateViewLayout(hubView,  hubLp);  } catch (Throwable t) { }
             try { wm.updateViewLayout(leftBar,  leftLp); } catch (Throwable t) { }
             try { wm.updateViewLayout(rightBar, rightLp); } catch (Throwable t) { }
+            /* 布局完成后实测一次位置，拿到原点补偿。
+             * 必须 post：updateViewLayout 是异步的，立刻 getLocationOnScreen 还是旧值。 */
+            if (hubView != null) {
+                hubView.post(new Runnable() { public void run() { calibrateOrigin(); } });
+            }
         }
     }
 
@@ -489,36 +526,40 @@ public class OverlayService extends Service {
 
     /** 左按钮的**视觉**矩形（和 LayoutParams 必须一致）。 */
     private int[] leftBarRect() {
-        int l = dp(12), t = hubCy() - dp(23);
-        return new int[] { l, t, l + barW(), t + dp(46) };
+        int l = dp(4), t = hubCy() - dp(18);
+        return new int[] { l, t, l + barW(), t + dp(36) };
     }
     /** 右按钮的**视觉**矩形。 */
     private int[] rightBarRect() {
         int sw = getResources().getDisplayMetrics().widthPixels;
-        int r = sw - dp(12), t = hubCy() - dp(23);
-        return new int[] { r - barW(), t, r, t + dp(46) };
+        int r = sw - dp(4), t = hubCy() - dp(18);
+        return new int[] { r - barW(), t, r, t + dp(36) };
     }
 
     /** 手指是否在左按钮上：**严格按视觉矩形 + barPad 容错**。
      *  绝不允许命中区延伸到屏幕中间 —— 那会让「站在圆圈上」被误判成「选中左」。 */
     private boolean onLeftBar(float x, float y) {
         int[] b = leftBarRect();
-        int padY = dp(10);   // 只给一点手指余量。原来 dp(36)=117px 让命中高 384px，是视觉的 2.56 倍
-        return x >= b[0] - barPad() && x <= b[2] + barPad()
-                && y >= b[1] - padY && y <= b[3] + padY;
+        int padY = dp(10);
+        /* **扣掉原点补偿**：判定按「视觉上真正在哪」算，不是按 lp 请求值。 */
+        float xx = x - originDX, yy = y - originDY;
+        return xx >= b[0] - barPad() && xx <= b[2] + barPad()
+                && yy >= b[1] - padY && yy <= b[3] + padY;
     }
     /** 手指是否在右按钮上。 */
     private boolean onRightBar(float x, float y) {
         int[] b = rightBarRect();
         int padY = dp(10);
-        return x >= b[0] - barPad() && x <= b[2] + barPad()
-                && y >= b[1] - padY && y <= b[3] + padY;
+        float xx = x - originDX, yy = y - originDY;
+        return xx >= b[0] - barPad() && xx <= b[2] + barPad()
+                && yy >= b[1] - padY && yy <= b[3] + padY;
     }
     /** 手指是否还在圆圈那一带的水平线附近（离开就藏按钮）。 */
-    private boolean inBand(float y) { return Math.abs(y - hubCy()) < hubBand(); }
+    private boolean inBand(float y) { return Math.abs((y - originDY) - hubCy()) < hubBand(); }
     /** 手指是否进了圆圈（视觉判定用）。 */
     private boolean inHub(float x, float y) {
-        return Math.hypot(x - hubCx(), y - hubCy()) < hubR();
+        float xx = x - originDX, yy = y - originDY;
+        return Math.hypot(xx - hubCx(), yy - hubCy()) < hubR();
     }
 
     /** **武装区**：以圆圈为中心的方形区域，边长比圆直径大一圈。

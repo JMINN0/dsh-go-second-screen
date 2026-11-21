@@ -408,7 +408,6 @@ public class OverlayService extends Service {
         rg.setColor(0xE60A0A0C);
         rg.setStroke(dp(2), 0x66FFFFFF);
         ring.setBackground(rg);
-        hub.addView(ring, new android.widget.LinearLayout.LayoutParams(dp(56), dp(56)));
         /* **圆圈里要有个符号。** 原来是个纯黑空饼 + 发丝描边，
          * 在深色画面上等于不存在，用户根本看不出这是个投放目标。 */
         android.widget.TextView hubIcon = new android.widget.TextView(this);

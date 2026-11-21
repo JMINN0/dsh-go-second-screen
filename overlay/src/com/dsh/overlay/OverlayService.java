@@ -312,6 +312,15 @@ public class OverlayService extends Service {
     private WindowManager.LayoutParams hubLp, leftLp, rightLp;
     private TextView leftLabel, rightLabel;
     private boolean hubShown = false;
+    /** 本次手势内是否已经「过圈」。
+     *
+     *  2026-11-21 用户报「拖到左右两边有时有反馈有时没反馈」——
+     *  根因：原来每帧用 `dropState >= 2` 判断是否武装，而 dropState 只有手指
+     *  真的穿过那个 117px 的小圆才会变 2。斜着拖过去路径不经过圆心 → 永远不武装
+     *  → 到了按钮位置也毫无反应。
+     *  现在改成：进过圈就锁住，直到松手/取消/离开水平带才清。
+     */
+    private boolean armedThisGesture = false;
     private int dropState = 0;      // 0=隐藏 1=幽灵(拖动中) 2=已进圈(按钮显示) 3=选中左 4=选中右
 
     /** 圆圈中心：屏幕正下方，抬离导航条。 */
@@ -474,20 +483,33 @@ public class OverlayService extends Service {
      *  绝不允许命中区延伸到屏幕中间 —— 那会让「站在圆圈上」被误判成「选中左」。 */
     private boolean onLeftBar(float x, float y) {
         int[] b = leftBarRect();
+        int padY = dp(36);   // 纵向容差放宽：条只有 46dp 高，手指容易偏上偏下
         return x >= b[0] - barPad() && x <= b[2] + barPad()
-                && y >= b[1] - barPad() && y <= b[3] + barPad();
+                && y >= b[1] - padY && y <= b[3] + padY;
     }
     /** 手指是否在右按钮上。 */
     private boolean onRightBar(float x, float y) {
         int[] b = rightBarRect();
+        int padY = dp(36);
         return x >= b[0] - barPad() && x <= b[2] + barPad()
-                && y >= b[1] - barPad() && y <= b[3] + barPad();
+                && y >= b[1] - padY && y <= b[3] + padY;
     }
     /** 手指是否还在圆圈那一带的水平线附近（离开就藏按钮）。 */
     private boolean inBand(float y) { return Math.abs(y - hubCy()) < hubBand(); }
-    /** 手指是否进了圆圈。 */
+    /** 手指是否进了圆圈（视觉判定用）。 */
     private boolean inHub(float x, float y) {
         return Math.hypot(x - hubCx(), y - hubCy()) < hubR();
+    }
+
+    /** **武装区**：以圆圈为中心的方形区域，边长比圆直径大一圈。
+     *
+     *  为什么不用圆：手指斜着拖过来时，圆形边界命中率低，会出现
+     *  「有时碰到有时没碰到」的飘忽感。方形区在四个方向上给的容错一致，
+     *  而且和「圆圈所在的中间那一块」这个直觉吻合。
+     */
+    private boolean inArmZone(float x, float y) {
+        int half = dp(110);
+        return Math.abs(x - hubCx()) < half && Math.abs(y - hubCy()) < half;
     }
 
 
@@ -792,50 +814,59 @@ int dx = (int)(e.getRawX() - downX);
                              *   · 没滑到按钮上松手 → 什么都不发生
                              */
                             float fx = e.getRawX(), fy = e.getRawY();
-                            boolean wasArmed = (dropState >= 2);
+                            boolean wasArmed = armedThisGesture || (dropState >= 2);
 
                             if (!inBand(fy)) {
-                                // 离开圆圈那条水平带：按钮消失，回到幽灵态
+                                // 离开水平带：按钮消失，重新过圈才能再出
                                 if (wasArmed) {
                                     docked = false;
+                                    armedThisGesture = false;
                                     setDropState(1);
                                 } else if (!hubShown) {
                                     setDropState(1);
                                 }
-                            } else if (inHub(fx, fy)) {
-                                // 进圆圈：按钮出现
+                            /* **按钮判定优先。**
+                             * 武装区 dp(110) 半宽=357px，和左右按钮（命中到 x=455 / 从 x=761 起）
+                             * 有一段 205px 的重叠。如果先判武装区，手指已经在按钮上了却只当「进圈」，
+                             * 用户看到的就是「滑到按钮上没反馈」。所以按钮优先。
+                             */
+                            } else if (wasArmed && onLeftBar(fx, fy)) {
+                                if (dropState != 3) {
+                                    setDropState(3);
+                                    try { root.performHapticFeedback(android.view.HapticFeedbackConstants.TEXT_HANDLE_MOVE); } catch (Throwable t) { }
+                                }
+                            } else if (wasArmed && onRightBar(fx, fy)) {
+                                if (dropState != 4) {
+                                    setDropState(4);
+                                    try { root.performHapticFeedback(android.view.HapticFeedbackConstants.TEXT_HANDLE_MOVE); } catch (Throwable t) { }
+                                }
+                            } else if (inArmZone(fx, fy)) {
+                                /* 进「武装区」：比圆圈大一圈的方形区，解决
+                                 * 「斜着拖过去没经过圆心所以没反应」的飘忽感。 */
                                 docked = true;
-                                if (dropState < 2) {
+                                if (!armedThisGesture) {
+                                    armedThisGesture = true;
                                     setDropState(2);
                                     try { root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable t) { }
+                                } else if (dropState < 2) {
+                                    setDropState(2);
                                 }
                             } else if (wasArmed) {
-                                // 已经在圆圈里、且还在带内：判断有没有滑到左右按钮
-                                if (onLeftBar(fx, fy)) {
-                                    if (dropState != 3) {
-                                        setDropState(3);
-                                        try { root.performHapticFeedback(android.view.HapticFeedbackConstants.TEXT_HANDLE_MOVE); } catch (Throwable t) { }
-                                    }
-                                } else if (onRightBar(fx, fy)) {
-                                    if (dropState != 4) {
-                                        setDropState(4);
-                                        try { root.performHapticFeedback(android.view.HapticFeedbackConstants.TEXT_HANDLE_MOVE); } catch (Throwable t) { }
-                                    }
-                                } else {
-                                    // 在带内但没到按钮：保持 2（按钮仍显示，但没选中）
-                                    if (dropState > 2) setDropState(2);
-                                }
+                                // 已武装但不在按钮也不在武装区：按钮保持显示，取消选中
+                                if (dropState > 2) setDropState(2);
                             }
                             return true;
                         case MotionEvent.ACTION_CANCEL:
                             /* 被打断（来电/系统弹窗/多指）：必须复位，否则 UI 会卡在屏幕上。 */
                             docked = false;
+                            armedThisGesture = false;
                             setDropState(0);
                             return true;
                         case MotionEvent.ACTION_UP:
                             /* ═══ 3. 松手：只有正好停在按钮上才执行 ═══ */
                             {
                                 final int pick = dropState;   // 3=左 4=右
+                                armedThisGesture = false;
                                 if (docked || pick == 3 || pick == 4) {
                                     docked = false;
                                     setDropState(0);

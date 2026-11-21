@@ -1630,7 +1630,13 @@ async function riskLevelOf(pkg) {
         const apps = d.apps || d;
         const info = apps[pkg];
         if (info && typeof info.level === 'number') return info.level;
-        return typeof d.unknown_level === 'number' ? d.unknown_level : -1;
+        /* **unknown_level 在 rules 下面，不在顶层。**
+         * 2026-11-21 对抗审查抓到：原来读 d.unknown_level 永远是 undefined，
+         * 于是未收录的 App 返回 -1 → 不写文件 → 浮窗继续显示上一个 App 的等级。
+         * 更糟：如果上一个是 L0（设置），切到银行类未收录 App 仍显示「L0 自由」。
+         */
+        const unk = (d.rules && d.rules.unknown_level);
+        return typeof unk === 'number' ? unk : 3;
       } catch { /* 试下一个路径 */ }
     }
   } catch { /* ignore */ }
@@ -1660,7 +1666,10 @@ export async function syncRiskLevel() {
       const n = await riskLevelOf(pkg);
       lv = n >= 0 ? 'L' + n : '';
     }
-    if (lv) markOpMode(lv);
+    /* 拿不到 pkg 或等级也要写 L3（未知即严格），
+     * 不能让上一个 App 的等级继续挂在浮窗上 —— 那比不显示更误导。 */
+    if (!lv) lv = 'L3';
+    markOpMode(lv);
     _riskCache = { at: Date.now(), pkg, lv };
     return lv;
   } catch { return ''; }

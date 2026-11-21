@@ -395,6 +395,27 @@ async function overlayStart(port) {
  * **多窗口后必须支持单关**：一块屏停止推流时，不该把别的屏的窗口也关了。
  */
 async function overlayStop(port) {
+  /* **服务没在跑就别发停止指令。**
+   *
+   * 2026-11-21 用户报：浮窗早关了，过一会又弹一个「已关闭」。
+   * 根因不只在那个 Toast —— 5 分钟空闲看门狗会调 streamStop()，
+   * 而 overlayStop() 用 `am start` 发 stop，**即使服务已经停了，
+   * 这条 Intent 也会把那个透明 Activity 拉起来**：旧 APK 弹 Toast，
+   * 新 APK 也会短暂抢一次焦点/键盘。删 Toast 只是去掉症状。
+   *
+   * 所以先查服务在不在，不在就直接返回，连 Intent 都不发。
+   */
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run0 = promisify(execFile);
+    const t0 = await adbTarget();
+    const { stdout: svc } = await run0('adb', ['-s', t0, 'shell',
+      `dumpsys activity services ${OVERLAY_PKG} 2>/dev/null | grep -c "${OVERLAY_PKG}"`],
+      { timeout: 6000 });
+    if (Number(String(svc).trim()) === 0) return { ok: true, skipped: 'service-not-running' };
+  } catch { /* 查不到就当它在跑，继续原来的路 */ }
+
   try {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');

@@ -301,6 +301,23 @@ function startIdleWatch() {
     if (st?.running) return;
     await shutdown('idle');
   }, 30_000).unref?.();
+
+    /* 每 5 秒把当前 App 的风控等级同步给浮窗。
+     *
+     * 浮窗每 3 秒重读那个文件并重绘，但文件原来只在 input() 时才写 ——
+     * 用户在那块屏上切了 App 又没点屏幕，底部 L 等级就一直停在旧值。
+     * 等级是用来判断「这一步能不能这么操作」的，过期值比不显示更糟。
+     *
+     * 5 秒是权衡：一次 dumpsys 约 250ms，太快会拖 CPU；
+     * 人切换 App 再看浮窗，5 秒滞后可以接受。没屏在跑就跳过，不空转。
+     */
+    setInterval(async () => {
+      try {
+        const st = await vd.status().catch(() => null);
+        if (!st?.running) return;
+        await vd.syncRiskLevel();
+      } catch { /* 同步失败不影响守护进程 */ }
+    }, 5_000).unref?.();
 }
 
 /**

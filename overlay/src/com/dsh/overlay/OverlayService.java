@@ -855,6 +855,11 @@ int dx = (int)(e.getRawX() - downX);
             final Runnable tick = new Runnable() {
                 public void run() {
                     if (!alive || !running) return;
+                    /* 每 3 秒同时刷新底部等级。原来只 pollStatus 查存活，
+                     * 从不刷 label —— 用户在那块屏上换了 App，L 等级一直停在旧值，
+                     * 除非手动收起再展开。等级是用来判断能不能这么操作的，
+                     * 显示过期值比不显示更糟。 */
+                    refreshLabel();
                     new Thread(new Runnable() {
                         public void run() {
                             if (!pollStatus()) return;   // 返回 false = 已决定关闭

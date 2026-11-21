@@ -988,6 +988,8 @@ export async function status() {
  * 投完还要**校验主屏焦点没变**，变了立刻切回去——「不影响主屏」是硬要求。
  */
 export async function launch(pkg, activity) {
+  // 投完 App 立刻把它的风控等级同步给浮窗（不等下一次 input）
+  setTimeout(() => { try { syncRiskLevel(); } catch { /* ignore */ } }, 2500);
   const s = await start();
   if (!s.ok) return { ok: false, hint: s.hint };
 

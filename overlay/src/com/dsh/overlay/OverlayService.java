@@ -406,9 +406,26 @@ public class OverlayService extends Service {
         GradientDrawable rg = new GradientDrawable();
         rg.setShape(GradientDrawable.OVAL);
         rg.setColor(0xE60A0A0C);
-        rg.setStroke(dp(1), 0x40FFFFFF);
+        rg.setStroke(dp(2), 0x66FFFFFF);
         ring.setBackground(rg);
         hub.addView(ring, new android.widget.LinearLayout.LayoutParams(dp(56), dp(56)));
+        /* **圆圈里要有个符号。** 原来是个纯黑空饼 + 发丝描边，
+         * 在深色画面上等于不存在，用户根本看不出这是个投放目标。 */
+        android.widget.TextView hubIcon = new android.widget.TextView(this);
+        hubIcon.setText("✕");
+        hubIcon.setTextColor(0xE6FFFFFF);
+        hubIcon.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f);
+        hubIcon.setGravity(Gravity.CENTER);
+        android.widget.FrameLayout hubWrap = new android.widget.FrameLayout(this);
+        android.widget.FrameLayout.LayoutParams rlp = new android.widget.FrameLayout.LayoutParams(dp(56), dp(56));
+        hubWrap.addView(ring, rlp);
+        android.widget.FrameLayout.LayoutParams ilp = new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
+        ilp.gravity = Gravity.CENTER;
+        hubWrap.addView(hubIcon, ilp);
+        hub.removeAllViews();
+        hub.addView(hubWrap, new android.widget.LinearLayout.LayoutParams(dp(56), dp(56)));
         /* 原来这里还塞了一个 1dp 高的 TextView，导致内容 57dp > 窗口 56dp 被裁，
          * 视觉中心偏半像素。去掉，窗口和内容都严格 dp(56)。 */
         hubView = hub;
@@ -507,7 +524,7 @@ public class OverlayService extends Service {
                 hubShown = true;
             }
             // 圆圈：幽灵 40% / 进圈 100%
-            hubView.setAlpha(state == 1 ? 0.40f : 1f);
+            hubView.setAlpha(state == 1 ? 0.58f : 1f);
             // 左右两条：只有进圈才看得见
             boolean showBars = state >= 2;
             leftBar.setAlpha(showBars ? 1f : 0f);
@@ -902,6 +919,13 @@ int dx = (int)(e.getRawX() - downX);
                             float fx = e.getRawX(), fy = e.getRawY();
                             boolean wasArmed = armedThisGesture || (dropState >= 2);
 
+                            /* **幽灵圈要常显。**
+                             * 审查抓到：原来只有 !inBand 时才 setDropState(1)，
+                             * 而窗口本来就停在屏幕下半部时（用户反复拖的就是那），
+                             * 第一帧就落在带内 → dropState 一直 0 → 圈根本不出现。
+                             */
+                            if (!hubShown) setDropState(1);
+
                             if (!inBand(fy)) {
                                 // 离开水平带：按钮消失，重新过圈才能再出
                                 if (wasArmed) {
@@ -1010,6 +1034,13 @@ int dx = (int)(e.getRawX() - downX);
                                 }
                             }
                             setDropState(0);
+                            /* **正常松手也要 clampPos。**
+                             * 2026-11-21 审查抓到：拖动时只保证「一半可见」，窗口能到 x=-300，
+                             * 整块盖住屏幕左边缘 0..96 的返回手势保护区 —— 把之前修好的
+                             * 「侧滑返回被悬浮窗抢走」重新引回来。收尾必须夹一次。
+                             */
+                            clampPos(curW, curH);
+                            try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
                             if (!moved && System.currentTimeMillis() - downAt < 400) toggle();
 
                         }

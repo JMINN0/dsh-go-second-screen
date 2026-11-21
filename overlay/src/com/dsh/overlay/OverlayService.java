@@ -540,16 +540,33 @@ public class OverlayService extends Service {
 
     private void hideRail() { setDropState(0); }
 
-    /** 左按钮的**视觉**矩形（和 LayoutParams 必须一致）。 */
+    /** 左按钮的**实测**矩形（直接问视图，不再自己算）。
+     *
+     *  **这是「反馈区和视觉错位」的根治办法。**
+     *  用户 2026-11-21 实测：左右按钮只有上半截能触发 ——
+     *  这说明视觉渲染位置比 lp 请求的低了 60~100px（一个状态栏高度），
+     *  而判定矩形一直按 lp 那套坐标算，于是判定区整体比视觉高。
+     *
+     *  之前想用 calibrateOrigin() 算差值再补，方向对但脆弱（要等布局、要防抖动）。
+     *  现在直接问视图自己在屏幕上的真实矩形 —— 眼睛看到哪，判定就在哪，天然自洽。
+     */
     private int[] leftBarRect() {
-        int l = dp(4), t = hubCy() - dp(18);
-        return new int[] { l, t, l + barW(), t + dp(36) };
+        return realRect(leftBar, dp(4), hubCy() - dp(18));
     }
-    /** 右按钮的**视觉**矩形。 */
+
+    /** 取视图的真实屏幕矩形；视图还没挂上去时退回请求值。 */
+    private int[] realRect(View v, int fallbackX, int fallbackY) {
+        if (v != null && v.isAttachedToWindow() && v.getWidth() > 0 && v.getHeight() > 0) {
+            int[] loc = new int[2];
+            v.getLocationOnScreen(loc);
+            return new int[] { loc[0], loc[1], loc[0] + v.getWidth(), loc[1] + v.getHeight() };
+        }
+        return new int[] { fallbackX, fallbackY, fallbackX + barW(), fallbackY + dp(36) };
+    }
+    /** 右按钮的**实测**矩形。 */
     private int[] rightBarRect() {
         int sw = getResources().getDisplayMetrics().widthPixels;
-        int r = sw - dp(4), t = hubCy() - dp(18);
-        return new int[] { r - barW(), t, r, t + dp(36) };
+        return realRect(rightBar, sw - dp(4) - barW(), hubCy() - dp(18));
     }
 
     /** 手指是否在左按钮上：**严格按视觉矩形 + barPad 容错**。
@@ -558,7 +575,7 @@ public class OverlayService extends Service {
         int[] b = leftBarRect();
         int padY = dp(10);
         /* **扣掉原点补偿**：判定按「视觉上真正在哪」算，不是按 lp 请求值。 */
-        float xx = x - originDX, yy = y - originDY;
+        float xx = x, yy = y;
         return xx >= b[0] - barPad() && xx <= b[2] + barPad()
                 && yy >= b[1] - padY && yy <= b[3] + padY;
     }
@@ -566,16 +583,33 @@ public class OverlayService extends Service {
     private boolean onRightBar(float x, float y) {
         int[] b = rightBarRect();
         int padY = dp(10);
-        float xx = x - originDX, yy = y - originDY;
+        float xx = x, yy = y;
         return xx >= b[0] - barPad() && xx <= b[2] + barPad()
                 && yy >= b[1] - padY && yy <= b[3] + padY;
     }
     /** 手指是否还在圆圈那一带的水平线附近（离开就藏按钮）。 */
-    private boolean inBand(float y) { return Math.abs((y - originDY) - hubCy()) < hubBand(); }
+    private boolean inBand(float y) { return Math.abs(y - hubCenterYReal()) < hubBand(); }
     /** 手指是否进了圆圈（视觉判定用）。 */
     private boolean inHub(float x, float y) {
-        float xx = x - originDX, yy = y - originDY;
-        return Math.hypot(xx - hubCx(), yy - hubCy()) < hubR();
+        /* 同样用实测矩形：取圆圈视图在屏幕上的真实中心。 */
+        if (hubView != null && hubView.isAttachedToWindow() && hubView.getWidth() > 0) {
+            int[] loc = new int[2];
+            hubView.getLocationOnScreen(loc);
+            float cx = loc[0] + hubView.getWidth() / 2f;
+            float cy = loc[1] + hubView.getHeight() / 2f;
+            return Math.hypot(x - cx, y - cy) < hubR();
+        }
+        return Math.hypot(x - hubCx(), y - hubCy()) < hubR();
+    }
+
+    /** 屏幕上的圆圈中心 Y（实测优先）。供水平带判定用。 */
+    private float hubCenterYReal() {
+        if (hubView != null && hubView.isAttachedToWindow() && hubView.getHeight() > 0) {
+            int[] loc = new int[2];
+            hubView.getLocationOnScreen(loc);
+            return loc[1] + hubView.getHeight() / 2f;
+        }
+        return hubCy();
     }
 
     /** **武装区**：以圆圈为中心的方形区域，边长比圆直径大一圈。

@@ -297,49 +297,47 @@ public class OverlayService extends Service {
     private boolean railShown = false;
 
     /** 滑轨的几何：底部一条横向跑道。 */
-    private int railY() { return getResources().getDisplayMetrics().heightPixels - dp(160); }
-    private int railLeft() { return dp(24); }
-    private int railRight() { return getResources().getDisplayMetrics().widthPixels - dp(24); }
+    /** 删除投放点：屏幕底部正中的圆圈+X。拖动时才出现。 */
+    private int dropY() { return getResources().getDisplayMetrics().heightPixels - dp(150); }
+    private int dropX() { return getResources().getDisplayMetrics().widthPixels / 2; }
 
-    /** 显示滑轨（拖动进入左下区域时调）。 */
-    private void showRail() {
+    /** 显示删除投放点（拖动开始时调）。
+     *
+     *  用户 2026-11-21 重新定义这套交互：
+     *    · 拖动时底部中间出现一个圆圈+X，松不松手都能看见
+     *    · 把窗口拖到那个圆圈上 → 左右两侧各展开一条路
+     *        左：只关闭这个悬浮窗
+     *        右：关闭悬浮窗 + 连后台屏一起关
+     *    · 松手即执行，不需要「先落地再二次拖动」
+     *    · 普通拖到左下/右下不触发任何删除（防误触）
+     */
+    private void showDrop() {
         if (railShown) return;
         railShown = true;
         try {
             if (railView == null) {
                 android.widget.FrameLayout fl = new android.widget.FrameLayout(this);
-                // 跑道底
-                GradientDrawable track = new GradientDrawable();
-                track.setColor(0xCC1A1A1A);
-                track.setCornerRadius(dp(24));
-                track.setStroke(dp(2), 0x66FFFFFF);
-                fl.setBackground(track);
-                fl.setPadding(dp(8), dp(8), dp(8), dp(8));
-                // 提示文字
-                TextView hint = new TextView(this);
-                hint.setText("拖到最右删除");
-                hint.setTextColor(0xAAFFFFFF);
-                hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-                android.widget.FrameLayout.LayoutParams hl =
+                // 圆圈
+                GradientDrawable ring = new GradientDrawable();
+                ring.setShape(GradientDrawable.OVAL);
+                ring.setColor(0xCC1A1A1A);
+                ring.setStroke(dp(3), 0x66FFFFFF);
+                fl.setBackground(ring);
+                // × 字
+                TextView x = new TextView(this);
+                x.setText("✕");
+                x.setTextColor(0xFFFFFFFF);
+                x.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+                android.widget.FrameLayout.LayoutParams xl =
                         new android.widget.FrameLayout.LayoutParams(
                                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
                                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
-                hl.gravity = Gravity.CENTER;
-                fl.addView(hint, hl);
-                // 圆形手柄
-                railKnob = new View(this);
-                GradientDrawable kb = new GradientDrawable();
-                kb.setShape(GradientDrawable.OVAL);
-                kb.setColor(0xFFFF3B30);
-                railKnob.setBackground(kb);
-                android.widget.FrameLayout.LayoutParams kl =
-                        new android.widget.FrameLayout.LayoutParams(dp(44), dp(44));
-                kl.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
-                fl.addView(railKnob, kl);
+                xl.gravity = Gravity.CENTER;
+                fl.addView(x, xl);
                 railView = fl;
 
                 railLp = new WindowManager.LayoutParams(
-                        railRight() - railLeft(), dp(64),
+                        dp(84), dp(84),
                         Build.VERSION.SDK_INT >= 26
                                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                                 : WindowManager.LayoutParams.TYPE_PHONE,
@@ -347,46 +345,70 @@ public class OverlayService extends Service {
                                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                         android.graphics.PixelFormat.TRANSLUCENT);
                 railLp.gravity = Gravity.TOP | Gravity.START;
-                railLp.x = railLeft();
-                railLp.y = railY();
+                railLp.x = dropX() - dp(42);
+                railLp.y = dropY() - dp(42);
                 wm.addView(railView, railLp);
+
+                // 左右两条路的提示（同一窗口里的两个 TextView，靠可见性切换）
+                railKnob = new android.widget.LinearLayout(this) {
+                    @Override protected void onDraw(android.graphics.Canvas c) { /* 容器不画 */ }
+                };
             } else {
                 wm.addView(railView, railLp);
             }
-            Log.i(TAG, "滑轨已显示");
+            Log.i(TAG, "删除投放点已显示");
         } catch (Throwable t) {
-            Log.e(TAG, "滑轨显示失败: " + t.getMessage());
+            Log.e(TAG, "投放点显示失败: " + t.getMessage());
         }
     }
 
-    /** 拖动时更新滑轨手柄位置（0..1）。 */
-    private void moveRailKnob(float frac) {
-        if (!railShown || railKnob == null) return;
+    /** 设置当前选中的方向：-1 左（关浮窗）/ +1 右（关浮窗+关屏）/ 0 未选。 */
+    private void setDropDir(int dir) {
+        if (railView == null) return;
         try {
-            int span = railRight() - railLeft() - dp(60);
-            android.widget.FrameLayout.LayoutParams kl =
-                    (android.widget.FrameLayout.LayoutParams) railKnob.getLayoutParams();
-            kl.leftMargin = Math.round(Math.max(0f, Math.min(1f, frac)) * span);
-            railKnob.setLayoutParams(kl);
+            GradientDrawable ring = new GradientDrawable();
+            ring.setShape(GradientDrawable.OVAL);
+            ring.setColor(dir == 0 ? 0xCC1A1A1A : (dir < 0 ? 0xCC2C7BE5 : 0xCCE5533D));
+            ring.setStroke(dp(3), dir == 0 ? 0x66FFFFFF : 0xFFFFFFFF);
+            railView.setBackground(ring);
+            // 圆圈大小随选中放大一点，给个明确反馈
+            int sz = dir == 0 ? dp(84) : dp(96);
+            railLp.width = sz; railLp.height = sz;
+            railLp.x = dropX() - sz / 2;
+            railLp.y = dropY() - sz / 2;
+            wm.updateViewLayout(railView, railLp);
         } catch (Throwable t) { /* ignore */ }
     }
 
-    /** 隐藏滑轨。 */
     private void hideRail() {
         if (!railShown) return;
         railShown = false;
-        try { if (railView != null) wm.removeView(railView); } catch (Throwable t) { /* ignore */ }
+        try {
+            if (railView != null) wm.removeView(railView);
+        } catch (Throwable t) { /* ignore */ }
     }
 
+
     /** 通知 AI：用户手动关了后台屏。 */
-    private void notifyUserDeleted(int port) {
+    /** 告诉插件「用户手动关掉了这个浮窗」。
+     *
+     *  alsoStopScreen=true 表示用户还要求连后台屏一起关 —— 那时连 /stop 一起打，
+     *  否则只关浮窗、屏留着。
+     *
+     *  为什么这件事必须通知 AI：用户可能正在等这个屏上的结果，
+     *  也可能只是收拾界面。AI 收到之后要自己判断「是不是打断了用户的活」，
+     *  再决定停下来问还是继续。
+     */
+    private void notifyUserDeleted(int port, boolean alsoStopScreen, int displayId) {
         try {
             final int p = port;
             new Thread(new Runnable() {
                 public void run() {
                     try {
                         java.net.HttpURLConnection c = (java.net.HttpURLConnection)
-                                new java.net.URL("http://127.0.0.1:" + p + "/event?type=user_deleted").openConnection();
+                                new java.net.URL("http://127.0.0.1:" + p + "/event?type=user_deleted"
+                                        + "&stopScreen=" + (alsoStopScreen ? "1" : "0")
+                                        + "&displayId=" + displayId).openConnection();
                         c.setConnectTimeout(1200);
                         c.setReadTimeout(1200);
                         c.getResponseCode();
@@ -418,7 +440,8 @@ public class OverlayService extends Service {
         boolean autoPos = true;   // 用户拖过就设 false，重排时不动它
         float dragFrac = -1f;     // 拖动时在滑轨上的位置（0..1，-1=不在滑轨上）
         boolean resizeMoved = false;   // 缩放手柄是否已越过阈值
-        boolean docked = false;        // 已停靠到删除滑轨（此时只能左右滑）
+        boolean docked = false;        // 已进入删除投放点（此时只判左右方向）
+        int armDir = 0;                // -1 左=只关浮窗 / +1 右=关浮窗+关后台屏 / 0 未选
         boolean statusTimerStarted = false;
         int statusFails = 0;
         int curW = 0, curH = 0;   // 当前实际尺寸（relayoutAuto 要用）
@@ -638,81 +661,66 @@ int dx = (int)(e.getRawX() - downX);
                             int sw = getResources().getDisplayMetrics().widthPixels;
                             int sh = getResources().getDisplayMetrics().heightPixels;
 
-                            // ═══ 已停靠：只允许沿滑轨左右移动，不跟手指乱跑 ═══
+                            /* ═══ 已进入删除投放点：只判左右，窗口跟手走 ═══ */
                             if (docked) {
-                                int span = Math.max(1, railRight() - railLeft());
-                                float f = (e.getRawX() - railLeft()) / (float) span;
-                                f = Math.max(0f, Math.min(1f, f));
-                                dragFrac = f;
-                                moveRailKnob(f);
-                                // 窗口跟着手柄走，视觉上像「攥着滑块」
-                                lp.x = railLeft() + Math.round(f * (span - Math.min(curW, span)));
-                                lp.y = railY() - curH / 2;
+                                int off = (int)(e.getRawX() - dropX());
+                                int dead = dp(48);
+                                int dir = off < -dead ? -1 : (off > dead ? 1 : 0);
+                                setDropDir(dir);
+                                armDir = dir;
+                                lp.x = (int)(e.getRawX() - curW / 2f);
+                                lp.y = dropY() - curH / 2;
                                 try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
                                 return true;
                             }
 
-                            // ═══ 未停靠：正常拖动，但**必须拖进停靠区才亮滑轨** ═══
+                            /* ═══ 未进入投放点：正常拖动 ═══ */
                             autoPos = false;
                             int ww2 = Math.max(dp(40), curW);
                             int hh2 = Math.max(dp(40), curH);
-                            // **至少一半留在屏内。**
-                            // 原来允许留 72dp，实测窗口跑到 x=-156（大半在屏外），用户找不着。
                             int keepX = Math.max(dp(72), ww2 / 2);
                             lp.x = Math.max(-(ww2 - keepX), Math.min(sw - keepX, startX + dx));
                             lp.y = Math.max(0, Math.min(sh - dp(72), startY + dy));
                             try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
 
-                            // **停靠区 = 屏幕左下角一块明确区域**（不是整个下半屏）。
-                            // 用户要求：先拖到这里停靠，才能往右拖删除 —— 防误触。
-                            int dockX = railLeft() + dp(40);
-                            int dockY = railY();
-                            boolean inDock = e.getRawX() < dockX + dp(120)
-                                          && Math.abs(e.getRawY() - dockY) < dp(90);
-                            if (inDock) {
-                                showRail();
-                                moveRailKnob(0f);
-                                dragFrac = 0f;
-                            } else {
-                                hideRail();
-                                dragFrac = -1f;
+                            /* 手指进到投放点半径内 → 亮起，进入可左右选择状态。
+                             * 注意：只要进圈就算「停靠」，不再要求先松手再拖 ——
+                             * 用户 2026-11-21 抱怨的正是「拉下去还得先松手才有效」。 */
+                            double dist = Math.hypot(e.getRawX() - dropX(), e.getRawY() - dropY());
+                            if (dist < dp(90)) {
+                                if (!railShown) showDrop();
+                                docked = true;
+                                armDir = 0;
+                                setDropDir(0);
                             }
                             return true;
                         case MotionEvent.ACTION_UP:
-                            // ═══ 已停靠时松手：滑到最右才删，否则退回 ═══
+                            /* ═══ 松手：在投放点上选左边就只关浮窗，选右边连屏一起关 ═══ */
                             if (docked) {
-                                if (dragFrac >= 0.82f) {
-                                    docked = false;
-                                    hideRail();
+                                final int finalDir = armDir;
+                                docked = false;
+                                armDir = 0;
+                                hideRail();
+                                if (finalDir != 0) {
                                     final int dp2 = port;
-                                    Log.i(TAG, "停靠后拖到右端 → 删除 port=" + dp2);
-                                    notifyUserDeleted(dp2);
+                                    final int dId = -1;   // 端口到 displayId 的映射在插件侧，这里只知道 port
+                                    Log.i(TAG, "投放点删除 port=" + dp2 + " dir=" + finalDir);
+                                    if (finalDir < 0) {
+                                        // 左：只关这个悬浮窗，后台屏留着
+                                        notifyUserDeleted(dp2, false, dId);
+                                    } else {
+                                        // 右：关浮窗 + 关后台屏
+                                        notifyUserDeleted(dp2, true, dId);
+                                    }
                                     ui.post(new Runnable() {
                                         public void run() { removeWin(dp2); }
                                     });
                                 } else {
-                                    // 没到右端：留在滑轨上，不删
-                                    Log.i(TAG, "停靠未到位，保留 port=" + port + " frac=" + dragFrac);
-                                    dragFrac = 0f;
-                                    moveRailKnob(0f);
+                                    // 没选方向：退回原位置，不删
+                                    Log.i(TAG, "投放点松手未选方向，保留 port=" + port);
+                                    clampPos(curW, curH);
+                                    try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
                                 }
-                                return true;
-                            }
-
-                            // ═══ 未停靠：松手时如果在停靠区 → 进入停靠状态 ═══
-                            int dockX2 = railLeft() + dp(40);
-                            boolean landDock = moved
-                                    && e.getRawX() < dockX2 + dp(120)
-                                    && Math.abs(e.getRawY() - railY()) < dp(90);
-                            if (landDock) {
-                                docked = true;
-                                showRail();
-                                dragFrac = 0f;
-                                moveRailKnob(0f);
-                                lp.x = railLeft();
-                                lp.y = railY() - curH / 2;
-                                try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
-                                Log.i(TAG, "已停靠到滑轨 port=" + port);
                                 return true;
                             }
 
@@ -987,16 +995,25 @@ int dx = (int)(e.getRawX() - downX);
            */
           void refreshLabel() {
               if (label == null) return;
-              String lv = readRiskLevel();
-              if (lv.isEmpty()) {
-                  // 没拿到等级就只显示屏号，不显示任何看不懂的字符串
+              String[] st = readStatus();
+              String lv = st == null ? "" : st[0];
+              String op = st == null ? "" : st[1];
+              String dn = st == null ? "" : st[2];
+              /* 三段：等级 · 操作方式 · 屏号。用户 2026-11-21 明确要这三样。
+               * 收起时空间小，只留等级。缺哪段就少显示哪段，不补占位符。 */
+              StringBuilder sb = new StringBuilder();
+              if (!lv.isEmpty()) sb.append(lv);
+              if (!collapsed) {
+                  if (!op.isEmpty()) { if (sb.length() > 0) sb.append(" · "); sb.append(op); }
+                  if (!dn.isEmpty()) { if (sb.length() > 0) sb.append(" · "); sb.append("屏").append(dn); }
+              }
+              if (sb.length() == 0) {
                   label.setText("屏 " + port);
                   label.setTextColor(0xCCFFFFFF);
-                  return;
+              } else {
+                  label.setText(sb.toString());
+                  label.setTextColor(lv.isEmpty() ? 0xCCFFFFFF : levelColor(lv));
               }
-              String w = levelWord(lv);
-              label.setText(collapsed ? lv : (w.isEmpty() ? lv : lv + " " + w));
-              label.setTextColor(levelColor(lv));
           }
 
         void showJpeg(byte[] jpg) {
@@ -1115,6 +1132,41 @@ int dx = (int)(e.getRawX() - downX);
      *
      *  格式：`L2|拟人化|vdisplay_tap_text` 或简写 `L2|vdisplay_tap_text`
      */
+    /** 读插件写的状态行：`L2|注入·tap|699`。缺段返回空串。
+     *
+     *  用户 2026-11-21 要求浮窗同时显示：风控等级、当前操作方式、后台屏编号。
+     *  插件在每次操作前/守护进程定时写这一行，浮窗轮询解析。
+     */
+    static String[] readStatus() {
+        java.io.BufferedReader r = null;
+        try {
+            r = new java.io.BufferedReader(new java.io.FileReader("/data/local/tmp/dshframe/opmode"));
+            String line = r.readLine();
+            if (line == null) return null;
+            line = line.trim();
+            if (line.isEmpty()) return null;
+            String[] parts = line.split("\\|", -1);
+            String[] out = new String[] { "", "", "" };
+            for (int i = 0; i < parts.length && i < 3; i++) {
+                String v = parts[i].trim();
+                out[i] = v.length() > 24 ? v.substring(0, 24) : v;
+            }
+            // 等级段必须是 L0..L5，别的当没拿到
+            String lv = out[0];
+            if (lv.length() != 2 || (lv.charAt(0) != 'L' && lv.charAt(0) != 'l')
+                    || lv.charAt(1) < '0' || lv.charAt(1) > '5') {
+                out[0] = "";
+            } else {
+                out[0] = "L" + lv.charAt(1);
+            }
+            return out;
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try { if (r != null) r.close(); } catch (Throwable t) { /* ignore */ }
+        }
+    }
+
     static String readRiskLevel() {
         java.io.BufferedReader r = null;
         try {

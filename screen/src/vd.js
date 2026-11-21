@@ -1646,7 +1646,7 @@ async function frameHash() {
  *  为什么要给用户看：风控等级越高，能用的操作就越朴素（越要拟人化）。
  *  用户看得见当前在哪一档，才知道为什么这一步慢了、为什么不直接点。
  */
-let _riskCache = { at: 0, pkg: '', lv: '' };
+let _riskCache = { at: 0, pkg: '', lv: '', op: '待机' };
 
 /** 读 docs/risk.json，返回某包的风控等级（0-5）。读不到返回 -1。 */
 async function riskLevelOf(pkg) {
@@ -1700,7 +1700,12 @@ export async function syncRiskLevel() {
     /* 拿不到 pkg 或等级也要写 L3（未知即严格），
      * 不能让上一个 App 的等级继续挂在浮窗上 —— 那比不显示更误导。 */
     if (!lv) lv = 'L3';
-    markOpMode(lv);
+    /* 写 `等级|操作方式|屏号` 三段。浮窗那边三个都要显示：
+     * 用户 2026-11-21 明确要求「风控等级、操作方式、和后台屏编号」都要有。
+     * 用竖线分隔，浮窗 split 后逐段解析，缺哪段就跳过哪段。 */
+    const _op = (_riskCache.op || '待机');
+    const _dn = state.displayId ? String(state.displayId) : '-';
+    markOpMode(lv + '|' + _op + '|' + _dn);
     _riskCache = { at: Date.now(), pkg, lv };
     return lv;
   } catch { return ''; }
@@ -1718,7 +1723,7 @@ export function markOpMode(text) {
 }
 
 export async function input(kind, a = {}) {
-  try { syncRiskLevel(); } catch { /* 不影响操作 */ }
+  try { _riskCache.op = '注入·' + kind; _riskCache.at = 0; syncRiskLevel(); } catch { /* 不影响操作 */ }
   const s = await start();
   if (!s.ok) return { ok: false, hint: s.hint };
   const d = state.displayId;

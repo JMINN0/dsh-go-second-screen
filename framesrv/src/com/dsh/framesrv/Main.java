@@ -716,7 +716,16 @@ public class Main {
                         int e2 = path.indexOf('&', q);
                         type = e2 > 0 ? path.substring(q + 5, e2) : path.substring(q + 5);
                     }
-                    String evLine = System.currentTimeMillis() + "|" + type + "|" + displayId + "\n";
+                    // 用户只关了浮窗，还是连后台屏一起关？这个区别对 AI 很重要：
+                    // 只关浮窗 = 嫌挡路；连屏一起关 = 要求停手。
+                    String stopScreen = "0";
+                    int qs = path.indexOf("stopScreen=");
+                    if (qs >= 0) {
+                        int e3 = path.indexOf('&', qs);
+                        stopScreen = (e3 > 0 ? path.substring(qs + 11, e3) : path.substring(qs + 11)).trim();
+                        if (!"1".equals(stopScreen)) stopScreen = "0";
+                    }
+                    String evLine = System.currentTimeMillis() + "|" + type + "|" + displayId + "|stopScreen=" + stopScreen + "\n";
                     java.io.FileOutputStream fo = new java.io.FileOutputStream(EVENTS_FILE, true);
                     fo.write(evLine.getBytes("UTF-8"));
                     fo.close();

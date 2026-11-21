@@ -1605,7 +1605,27 @@ async function frameHash() {
  * 让调用方知道"这一下没生效"，而不是像以前那样一律 ok:true（实测 一定比例 白点）。
  * 传 verify:false 可跳过校验（省 2 次截图，约 0.3 秒），适合连续点同一个界面时。
  */
+/** 把「当前操作方式 + 风控等级」写到浮窗能读到的地方。
+ *
+ *  浮窗（Java 进程）和插件（Node 进程）是两个进程，
+ *  共同能写的地方只有 /data/local/tmp。落一行文本最省事，不用开 socket。
+ *
+ *  为什么要给用户看：风控等级越高，能用的操作就越朴素（越要拟人化）。
+ *  用户看得见当前在哪一档，才知道为什么这一步慢了、为什么不直接点。
+ */
+export function markOpMode(text) {
+  /* 插件跑在 proot 里，没有设备的 /data/local/tmp，只能通过 adb 写。
+   * 用 fire-and-forget：这一步只是为了给用户看状态，不能拖慢真正的操作，
+   * 所以不 await、失败也不管。 */
+  try {
+    const t = String(text || '').replace(/["'`$\\]/g, '').slice(0, 60);
+    adb(['shell', 'mkdir -p /data/local/tmp/dshframe; echo "' + t + '" > /data/local/tmp/dshframe/opmode'])
+      .catch(() => {});
+  } catch { /* ignore */ }
+}
+
 export async function input(kind, a = {}) {
+  try { markOpMode('注入·' + kind); } catch {}
   const s = await start();
   if (!s.ok) return { ok: false, hint: s.hint };
   const d = state.displayId;

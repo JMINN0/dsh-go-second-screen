@@ -62,6 +62,15 @@ import java.util.Map;
  * 保证 N 个窗口互不重叠且都在屏内（见 {@link #cascadePos}）。
  */
 public class OverlayService extends Service {
+
+    /** 返回手势边缘保护带（px）。左右各留这么宽，窗口不许贴边。
+     *
+     *  用户 2026-11-21 报：主屏侧滑返回时 B 站没反应 —— 手势被悬浮窗抢走。
+     *  系统返回手势从屏幕左右边缘的窄条起手（各厂商 20-40dp），
+     *  @480dpi 下 96px ≈ 32dp，覆盖大部分机型。
+     */
+    static final int EDGE_GUARD = 96;
+
     private static final String TAG = "DshOverlay";
     private static final String CH_ID = "dsh_overlay";
     private static final int CH_NUM = 4201;
@@ -495,7 +504,7 @@ public class OverlayService extends Service {
             label.setTextColor(Color.WHITE);
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
             label.setGravity(Gravity.CENTER);
-            label.setText("屏 " + port);
+            refreshLabel();
             // 标签浮在底部居中，半透明底，不占布局高度
             GradientDrawable lbg = new GradientDrawable();
             lbg.setColor(0x88000000);
@@ -586,13 +595,26 @@ public class OverlayService extends Service {
             int w0 = Math.round(getResources().getDisplayMetrics().widthPixels * 0.46f);
             int h0 = Math.round(w0 * 1.6f);
             curW = w0; curH = h0;
+            /* **必须加 FLAG_NOT_TOUCH_MODAL，否则窗口边界内的触摸全被吃掉。**
+             *
+             * 2026-11-21 用户报的 bug：主屏侧滑返回时，B站没反应 —— 手势被悬浮窗抢了。
+             * 根因是窗口位置 x=dp(12) 落在系统返回手势的边缘感应区里，
+             * 手指从屏幕左/右边缘滑进来，起点就在窗口范围内，事件被这个窗口消费了。
+             *
+             * 修法两条一起上：
+             *   1) 加 FLAG_NOT_TOUCH_MODAL —— 窗口外的触摸明确放行给下层
+             *   2) clampPos 里把位置限制在手势安全区之外（见 EDGE_GUARD）
+             * 只做其中一条都还会漏：单加 flag，窗口盖住边缘时照样抢；
+             * 单挪位置，用户一拖动又回到边缘。
+             */
             lp = new WindowManager.LayoutParams(w0, h0, type,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                     android.graphics.PixelFormat.TRANSLUCENT);
             lp.gravity = Gravity.TOP | Gravity.START;
 
             // 先给个临时位置，等第一帧拿到尺寸后 relayoutAuto() 会重排
-            lp.x = dp(12);
+            lp.x = EDGE_GUARD;   // 避开返回手势边缘区，见 clampPos
             lp.y = dp(120) + wins.size() * dp(60);
 
             root.setOnTouchListener(new View.OnTouchListener() {
@@ -718,9 +740,19 @@ int dx = (int)(e.getRawX() - downX);
             if (lp == null) return;
             int sw = getResources().getDisplayMetrics().widthPixels;
             int sh = getResources().getDisplayMetrics().heightPixels;
-            int keep = Math.max(dp(72), ww / 2);   // 至少一半可见
-            lp.x = Math.max(-(ww - keep), Math.min(sw - keep, lp.x));
-            lp.y = Math.max(0, Math.min(sh - keep, lp.y));
+            /* **左右各留 EDGE_GUARD 的手势安全区，不许贴边。**
+             *
+             * 用户 2026-11-21 报：主屏侧滑返回被悬浮窗抢走，B站没反应。
+             * 系统返回手势从屏幕左/右边缘的窄条起手（各厂商 20-40dp 不等，
+             * 这里取 32dp 覆盖大部分机型）。窗口只要盖住那条，手势起点就落在窗口上。
+             *
+             * 所以窗口的左右边界都必须离开屏幕边缘至少这个距离。
+             * 上下不设限：手势不从上/下边缘起手（下拉通知栏是另一套）。
+             */
+            int minX = EDGE_GUARD;
+            int maxX = Math.max(minX, sw - ww - EDGE_GUARD);
+            lp.x = Math.max(minX, Math.min(maxX, lp.x));
+            lp.y = Math.max(0, Math.min(Math.max(0, sh - hh), lp.y));
         }
 
         void toggle() {
@@ -746,12 +778,12 @@ int dx = (int)(e.getRawX() - downX);
                     clampPos(smallW, smallH);
                     try { wm.updateViewLayout(root, lp); } catch (Throwable t) { /* ignore */ }
                 }
-                if (label != null) label.setText("屏 " + port);
+                if (label != null) refreshLabel();
                 return;
             }
             if (label != null) {
                 // **始终显示「屏 N」**：只显示数字会被误认为窗口坏了
-                label.setText("屏 " + port);
+                refreshLabel();
                 label.setTextSize(TypedValue.COMPLEX_UNIT_SP, collapsed ? 11 : 10);
             }
             if (!collapsed) {
@@ -943,6 +975,18 @@ int dx = (int)(e.getRawX() - downX);
          * 上限按窗口数动态算：1 个窗口 30fps，2-3 个 15fps，4+ 个 8fps。
          * 超出的帧直接丢（**丢掉比排队好** —— 排队只会越来越延迟）。
          */
+          /** 刷新底部那行字：屏号 + 风控等级 + 当前操作方式。
+           *
+           * 数据来自 /data/local/tmp/dshframe/opmode，由插件每次操作前写入。
+           * 收起状态只显示屏号。
+           */
+          void refreshLabel() {
+              if (label == null) return;
+              String om = collapsed ? "" : readOpMode();
+              String base = "屏 " + port;
+              label.setText(om.isEmpty() ? base : base + " · " + om);
+          }
+
         void showJpeg(byte[] jpg) {
             long now = System.currentTimeMillis();
             int n = Math.max(1, wins.size());
@@ -1049,6 +1093,29 @@ int dx = (int)(e.getRawX() - downX);
 
     static void sleep(long ms) {
         try { Thread.sleep(ms); } catch (InterruptedException e) { /* ignore */ }
+    }
+
+    /** 当前操作方式与风控等级，从 /data/local/tmp/dshframe/opmode 读。
+     *
+     *  为什么走文件：插件（Node）和浮窗（Java）是两个进程，
+     *  但都在 uid 2000 能写的 /data/local/tmp 下，落一个小文件最省事，
+     *  不用再开 socket。插件每次操作前写一行，浮窗轮询读，读不到就显示空。
+     *
+     *  格式：`L2|拟人化|vdisplay_tap_text` 或简写 `L2|vdisplay_tap_text`
+     */
+    static String readOpMode() {
+        java.io.BufferedReader r = null;
+        try {
+            r = new java.io.BufferedReader(new java.io.FileReader("/data/local/tmp/dshframe/opmode"));
+            String line = r.readLine();
+            if (line == null) return "";
+            line = line.trim();
+            return line.length() > 64 ? line.substring(0, 64) : line;
+        } catch (Throwable t) {
+            return "";
+        } finally {
+            try { if (r != null) r.close(); } catch (Throwable t) { /* ignore */ }
+        }
     }
 
     int dp(int v) {

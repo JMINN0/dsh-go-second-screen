@@ -344,7 +344,7 @@ public class OverlayService extends Service {
      */
     private int hubR() { return dp(36); }
     /** 水平带半高：离开这个范围按钮就消失。 */
-    private int hubBand() { return dp(120); }
+    private int hubBand() { return dp(52); }   // 原来 dp(120)=390px 占屏高 23%，太宽
     /** 左/右按钮窗口宽度。
      *
      *  原来是 dp(168)=546px，占屏宽 **45%**，两条加起来 90%，中间只剩 10% 空隙 ——
@@ -429,6 +429,26 @@ public class OverlayService extends Service {
         rightLp.y = hubCy() - dp(23);
     }
 
+    /** **按当前屏幕重新摆三个投放窗口。** 每次 ACTION_DOWN 调一次。
+     *
+     *  为什么不缓存：heightPixels 在 Service 里不稳定（见 ACTION_DOWN 的注释），
+     *  缓存的坐标会和现算的命中区脱钩。
+     */
+    private void layoutDropViews() {
+        if (hubLp == null) return;
+        int sw = getResources().getDisplayMetrics().widthPixels;
+        int sh = getResources().getDisplayMetrics().heightPixels;
+        int cx = sw / 2, cy = sh - dp(96);
+        hubLp.x = cx - dp(28);   hubLp.y = cy - dp(28);
+        leftLp.x = dp(12);       leftLp.y = cy - dp(23);
+        rightLp.x = dp(12);      rightLp.y = cy - dp(23);   // gravity=END，x 是右边距
+        if (hubShown) {
+            try { wm.updateViewLayout(hubView,  hubLp);  } catch (Throwable t) { }
+            try { wm.updateViewLayout(leftBar,  leftLp); } catch (Throwable t) { }
+            try { wm.updateViewLayout(rightBar, rightLp); } catch (Throwable t) { }
+        }
+    }
+
     /** 显示/更新投放 UI。state: 0 隐藏, 1 幽灵, 2 进圈, 3 选左, 4 选右。 */
     private void setDropState(int state) {
         try {
@@ -483,14 +503,14 @@ public class OverlayService extends Service {
      *  绝不允许命中区延伸到屏幕中间 —— 那会让「站在圆圈上」被误判成「选中左」。 */
     private boolean onLeftBar(float x, float y) {
         int[] b = leftBarRect();
-        int padY = dp(36);   // 纵向容差放宽：条只有 46dp 高，手指容易偏上偏下
+        int padY = dp(10);   // 只给一点手指余量。原来 dp(36)=117px 让命中高 384px，是视觉的 2.56 倍
         return x >= b[0] - barPad() && x <= b[2] + barPad()
                 && y >= b[1] - padY && y <= b[3] + padY;
     }
     /** 手指是否在右按钮上。 */
     private boolean onRightBar(float x, float y) {
         int[] b = rightBarRect();
-        int padY = dp(36);
+        int padY = dp(10);
         return x >= b[0] - barPad() && x <= b[2] + barPad()
                 && y >= b[1] - padY && y <= b[3] + padY;
     }
@@ -792,6 +812,15 @@ public class OverlayService extends Service {
                             armedThisGesture = false;
                             docked = false;
                             if (hubShown) setDropState(0);
+                            /* **每次按下重算几何并重摆窗口。**
+                             * 2026-11-21 坐标审查抓到：ensureDropViews() 里有
+                             * `if (hubView != null) return;` —— 三个窗口坐标一辈子只算一次，
+                             * 而 hubCy() 每帧现算。heightPixels 在服务里会变
+                             * （API30+ 返回进程内顶层 Activity 的尺寸，而 MainActivity 是 noHistory，
+                             * 销毁后值会跳 65~173px），一变就视觉停在旧位置、命中跟新位置走。
+                             * 这就是「触碰位置跟 UI 有点差别」的时序来源。
+                             */
+                            layoutDropViews();
                             return true;
                         case MotionEvent.ACTION_MOVE:
 int dx = (int)(e.getRawX() - downX);

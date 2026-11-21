@@ -294,6 +294,10 @@ public class OverlayService extends Service {
     private View railView;
     private WindowManager.LayoutParams railLp;
     private View railKnob;
+    private TextView dropHint;        // 环下方的提示文字
+    private int dropState = 0;        // 0幽灵 / 1已进入 / 2已锁定
+    private long dropEnterAt = 0;     // 进入投放区的时间，用于停留判定
+    private static final long DWELL_MS = 400;   // 停留多久算锁定
     private boolean railShown = false;
 
     /** 滑轨的几何：底部一条横向跑道。 */
@@ -316,37 +320,46 @@ public class OverlayService extends Service {
         railShown = true;
         try {
             if (railView == null) {
-                android.widget.FrameLayout fl = new android.widget.FrameLayout(this);
-                // 圆圈
+                android.widget.LinearLayout fl = new android.widget.LinearLayout(this);
+                fl.setOrientation(android.widget.LinearLayout.VERTICAL);
+                fl.setGravity(Gravity.CENTER_HORIZONTAL);
+                // 圆环（用一层 View 画）
+                View ringView = new View(this);
                 GradientDrawable ring = new GradientDrawable();
                 ring.setShape(GradientDrawable.OVAL);
                 ring.setColor(0xCC1A1A1A);
-                ring.setStroke(dp(3), 0x66FFFFFF);
-                fl.setBackground(ring);
-                // × 字
-                TextView x = new TextView(this);
-                x.setText("✕");
-                x.setTextColor(0xFFFFFFFF);
-                x.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
-                android.widget.FrameLayout.LayoutParams xl =
-                        new android.widget.FrameLayout.LayoutParams(
-                                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-                                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT);
-                xl.gravity = Gravity.CENTER;
-                fl.addView(x, xl);
+                ring.setStroke(dp(2), 0x88FFFFFF);
+                ringView.setBackground(ring);
+                fl.addView(ringView, new android.widget.LinearLayout.LayoutParams(dp(56), dp(56)));
+                // ✕ 叠在环中心：用一个 FrameLayout 包住
+                // （简化：环用带 ✕ 的 TextView 自己画，省一层）
+                // 文字提示
+                dropHint = new TextView(this);
+                dropHint.setText("拖到这里关闭");
+                dropHint.setTextColor(0xCCFFFFFF);
+                dropHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+                dropHint.setPadding(0, dp(4), 0, 0);
+                fl.addView(dropHint);
                 railView = fl;
 
+                /* **圆环 + 下方文字提示，整体 56dp 直径。**
+                 * 2026-11-21 用户实测「巨大一个圆圈x」：原来 dp(84) 在 density=3.0 上是 252px，
+                 * 占屏宽 20.7%。现在 56dp=168px，占 13.8%，并把提示文字放进同一个窗口，
+                 * 让用户知道「拖到这里干什么」，而不是一个孤零零的 ✕。
+                 */
                 railLp = new WindowManager.LayoutParams(
-                        dp(84), dp(84),
+                        dp(140), dp(96),
                         Build.VERSION.SDK_INT >= 26
                                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                                 : WindowManager.LayoutParams.TYPE_PHONE,
                         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                         android.graphics.PixelFormat.TRANSLUCENT);
                 railLp.gravity = Gravity.TOP | Gravity.START;
-                railLp.x = dropX() - dp(42);
-                railLp.y = dropY() - dp(42);
+                railLp.x = dropX() - dp(70);
+                railLp.y = dropY() - dp(48);
+                railView.setAlpha(0.3f);   // **第一次拖动就以幽灵态出现**，让用户知道有这个目标
                 wm.addView(railView, railLp);
 
                 // 左右两条路的提示（同一窗口里的两个 TextView，靠可见性切换）
@@ -362,21 +375,28 @@ public class OverlayService extends Service {
         }
     }
 
-    /** 设置当前选中的方向：-1 左（关浮窗）/ +1 右（关浮窗+关屏）/ 0 未选。 */
-    private void setDropDir(int dir) {
+    /** 更新投放环的状态。**只改透明度和描边/文字，绝不改窗口尺寸** ——
+     *  拖动过程中改尺寸必然导致视觉跳变（上一版的教训）。 */
+    private void setDropState(int state) {
         if (railView == null) return;
+        dropState = state;
         try {
-            GradientDrawable ring = new GradientDrawable();
-            ring.setShape(GradientDrawable.OVAL);
-            ring.setColor(dir == 0 ? 0xCC1A1A1A : (dir < 0 ? 0xCC2C7BE5 : 0xCCE5533D));
-            ring.setStroke(dp(3), dir == 0 ? 0x66FFFFFF : 0xFFFFFFFF);
-            railView.setBackground(ring);
-            // 圆圈大小随选中放大一点，给个明确反馈
-            int sz = dir == 0 ? dp(84) : dp(96);
-            railLp.width = sz; railLp.height = sz;
-            railLp.x = dropX() - sz / 2;
-            railLp.y = dropY() - sz / 2;
-            wm.updateViewLayout(railView, railLp);
+            switch (state) {
+                case 0:   // 幽灵：远处也能看见有个目标
+                    railView.setAlpha(0.35f);
+                    break;
+                case 1:   // 已进入：全亮，开始计时
+                    railView.setAlpha(1f);
+                    break;
+                case 2:   // 已锁定：可以松手执行
+                    railView.setAlpha(1f);
+                    if (dropHint != null) {
+                        dropHint.setText("松手执行");
+                        dropHint.setTextColor(0xFFFF6B6B);
+                    }
+                    break;
+                default: break;
+            }
         } catch (Throwable t) { /* ignore */ }
     }
 
@@ -662,62 +682,42 @@ int dx = (int)(e.getRawX() - downX);
                             int sh = getResources().getDisplayMetrics().heightPixels;
 
                             /* ═══ 已进入删除投放点：只判左右，窗口跟手走 ═══ */
-                            if (docked) {
-                                int off = (int)(e.getRawX() - dropX());
-                                int dead = dp(48);
-                                int dir = off < -dead ? -1 : (off > dead ? 1 : 0);
-                                setDropDir(dir);
-                                armDir = dir;
-                                lp.x = (int)(e.getRawX() - curW / 2f);
-                                lp.y = dropY() - curH / 2;
-                                try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
-                                return true;
-                            }
-
-                            /* ═══ 未进入投放点：正常拖动 ═══ */
-                            autoPos = false;
-                            int ww2 = Math.max(dp(40), curW);
-                            int hh2 = Math.max(dp(40), curH);
-                            int keepX = Math.max(dp(72), ww2 / 2);
-                            lp.x = Math.max(-(ww2 - keepX), Math.min(sw - keepX, startX + dx));
-                            lp.y = Math.max(0, Math.min(sh - dp(72), startY + dy));
-                            try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
-
-                            /* 手指进到投放点半径内 → 亮起，进入可左右选择状态。
-                             * 注意：只要进圈就算「停靠」，不再要求先松手再拖 ——
-                             * 用户 2026-11-21 抱怨的正是「拉下去还得先松手才有效」。 */
-                            double dist = Math.hypot(e.getRawX() - dropX(), e.getRawY() - dropY());
-                            if (dist < dp(90)) {
-                                if (!railShown) showDrop();
-                                docked = true;
-                                armDir = 0;
-                                setDropDir(0);
-                            }
-                            return true;
+                              /* ═══ 已进入投放环：**窗口冻结不动**，只等停留计时 ═══
+                               *
+                               * 用户 2026-11-21 实测三个问题都来自上一版：
+                               *   1) 巨大圆圈 —— 已缩到 56dp
+                               *   2) 窗口被吸附 —— 现在进环后一个字都不改窗口坐标
+                               *   3) 碰一下就没了 —— 现在必须「进环 + 停留 400ms 锁定」才允许执行，
+                               *      单纯滑过去松手不会删。
+                               */
+                              if (dropEnterAt == 0) {
+                                  dropEnterAt = System.currentTimeMillis();
+                                  setDropState(1);
+                                  try { root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable t) { }
+                              }
+                              long dwell = System.currentTimeMillis() - dropEnterAt;
+                              if (dropState != 2 && dwell >= DWELL_MS) {
+                                  setDropState(2);   // 锁定：现在松手才会执行
+                                  try { root.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM); } catch (Throwable t) { }
+                              }
+                              return true;
                         case MotionEvent.ACTION_UP:
-                            /* ═══ 松手：在投放点上选左边就只关浮窗，选右边连屏一起关 ═══ */
+                            /* ═══ 松手：**只有已锁定才执行**，没锁定一律取消 ═══ */
                             if (docked) {
-                                final int finalDir = armDir;
+                                final boolean locked = (dropState == 2);
                                 docked = false;
-                                armDir = 0;
+                                dropEnterAt = 0;
                                 hideRail();
-                                if (finalDir != 0) {
+                                if (locked) {
                                     final int dp2 = port;
-                                    final int dId = -1;   // 端口到 displayId 的映射在插件侧，这里只知道 port
-                                    Log.i(TAG, "投放点删除 port=" + dp2 + " dir=" + finalDir);
-                                    if (finalDir < 0) {
-                                        // 左：只关这个悬浮窗，后台屏留着
-                                        notifyUserDeleted(dp2, false, dId);
-                                    } else {
-                                        // 右：关浮窗 + 关后台屏
-                                        notifyUserDeleted(dp2, true, dId);
-                                    }
+                                    Log.i(TAG, "投放环锁定 → 删除 port=" + dp2);
+                                    notifyUserDeleted(dp2, true, -1);
                                     ui.post(new Runnable() {
                                         public void run() { removeWin(dp2); }
                                     });
                                 } else {
-                                    // 没选方向：退回原位置，不删
-                                    Log.i(TAG, "投放点松手未选方向，保留 port=" + port);
+                                    // 没锁就松手：什么都不做，窗口已经冻结在原位
+                                    Log.i(TAG, "投放环未锁定，取消 port=" + port);
                                     clampPos(curW, curH);
                                     try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
                                 }

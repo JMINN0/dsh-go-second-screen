@@ -1554,7 +1554,16 @@ export async function pollUserEvents() {
       const ts = Number(parts[0]) || 0;
       if (ts <= lastSeen) continue;
       if (ts > maxTs) maxTs = ts;
-      fresh.push({ ts, type: parts[1], displayId: parts[2] });
+      /* **必须把 stopScreen 也带出来。**
+       * 2026-11-21 对抗审查抓到：浮窗写 `ts|type|displayId|stopScreen=N`，
+       * 这里只取前 3 段 → stopScreen 被丢掉 → AI 分不清用户是
+       * 「只关浮窗」（嫌挡路，活可能还要继续）还是「连屏一起停」（明确要求停手）。
+       */
+      let stopScreen = false;
+      for (let k = 3; k < parts.length; k++) {
+        if (parts[k].startsWith('stopScreen=')) stopScreen = parts[k].endsWith('=1');
+      }
+      fresh.push({ ts, type: parts[1], displayId: parts[2], stopScreen });
     }
     if (!fresh.length) return [];
 

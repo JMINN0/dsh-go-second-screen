@@ -508,8 +508,14 @@ public class OverlayService extends Service {
      *  而且和「圆圈所在的中间那一块」这个直觉吻合。
      */
     private boolean inArmZone(float x, float y) {
-        int half = dp(110);
-        return Math.abs(x - hubCx()) < half && Math.abs(y - hubCy()) < half;
+        /* **必须等于真实的圆。**
+         * 2026-11-21 对抗审查抓到：这里原来是个半宽 dp(110)=358px 的方块，
+         * 面积是圆的 19.7 倍，手指离圈边还有 266px 就判「进圈」。
+         * 而 inHub()/hubR() 根本没被调用，所以我之前把 hubR 从 76dp 改到 36dp
+         * 对行为是零影响 —— 用户那句「触碰位置跟 UI 有差别」一点没修掉。
+         * 「斜着拖过去没反应」的问题由 armedThisGesture（进过一次就锁）解决，
+         * 不需要靠放大判定区。 */
+        return inHub(x, y);
     }
 
 
@@ -776,6 +782,16 @@ public class OverlayService extends Service {
                             downX = e.getRawX(); downY = e.getRawY();
                             startX = lp.x; startY = lp.y;
                             moved = false; downAt = System.currentTimeMillis();
+                            /* **每次按下都强制复位。**
+                             * 2026-11-21 对抗审查抓到：armedThisGesture 是 Service 级字段，
+                             * 原来只在 UP/CANCEL/离开水平带 三处复位。只要有一次手势被打断
+                             * （比如 pollStatus 发现屏没了、窗口自己关掉），它留 true，
+                             * 下一次拖任何窗口都算「已武装」→ 没经过圆圈就能直接滑到按钮删。
+                             * 这正是用户禁止的「恢复拖拽进度」。ACTION_DOWN 是唯一权威复位点。
+                             */
+                            armedThisGesture = false;
+                            docked = false;
+                            if (hubShown) setDropState(0);
                             return true;
                         case MotionEvent.ACTION_MOVE:
 int dx = (int)(e.getRawX() - downX);
@@ -841,16 +857,18 @@ int dx = (int)(e.getRawX() - downX);
                                     try { root.performHapticFeedback(android.view.HapticFeedbackConstants.TEXT_HANDLE_MOVE); } catch (Throwable t) { }
                                 }
                             } else if (inArmZone(fx, fy)) {
-                                /* 进「武装区」：比圆圈大一圈的方形区，解决
-                                 * 「斜着拖过去没经过圆心所以没反应」的飘忽感。 */
+                                /* **回到圆圈必须无条件降级到 2。**
+                                 * 2026-11-21 对抗审查抓到致命 bug：原来只在 dropState<2 时
+                                 * setDropState(2)，所以「选中左(3) → 滑回圆圈 → 松手」时
+                                 * dropState 仍是 3 → 直接删除。
+                                 * 用户的原话是「只要没放在左右两边其中一个按钮上就不算」，
+                                 * 松手在圆圈里正是「没放在按钮上」，绝不该删。 */
                                 docked = true;
                                 if (!armedThisGesture) {
                                     armedThisGesture = true;
-                                    setDropState(2);
                                     try { root.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK); } catch (Throwable t) { }
-                                } else if (dropState < 2) {
-                                    setDropState(2);
                                 }
+                                if (dropState != 2) setDropState(2);
                             } else if (wasArmed) {
                                 // 已武装但不在按钮也不在武装区：按钮保持显示，取消选中
                                 if (dropState > 2) setDropState(2);
@@ -865,7 +883,17 @@ int dx = (int)(e.getRawX() - downX);
                         case MotionEvent.ACTION_UP:
                             /* ═══ 3. 松手：只有正好停在按钮上才执行 ═══ */
                             {
-                                final int pick = dropState;   // 3=左 4=右
+                                /* **松手时用事件自己的坐标重判，不信上一帧的 dropState。**
+                                 * 2026-11-21 对抗审查抓到：快速滑到按钮立刻抬手时，
+                                 * 最后一次 MOVE 可能还没到，dropState 仍是 2 → 不触发。
+                                 * 用户感知就是「有时灵有时不灵」。
+                                 */
+                                final float upx = e.getRawX(), upy = e.getRawY();
+                                int pick = 2;
+                                if (armedThisGesture && inBand(upy)) {
+                                    if (onLeftBar(upx, upy)) pick = 3;
+                                    else if (onRightBar(upx, upy)) pick = 4;
+                                }
                                 armedThisGesture = false;
                                 if (docked || pick == 3 || pick == 4) {
                                     docked = false;
@@ -880,6 +908,26 @@ int dx = (int)(e.getRawX() - downX);
                                     if (pick == 4) {
                                         final int p4 = port;
                                         Log.i(TAG, "松手在右按钮 → 关浮窗+停后台屏 port=" + p4);
+                                        /* **真的停屏。**
+                                         * 2026-11-21 对抗审查抓到：原来这里只发了个 /event 就 removeWin，
+                                         * framesrv 只是往 events.log 写一行，虚拟屏照跑、CPU 照烧，
+                                         * 用户按左按右结果一模一样。
+                                         * framesrv 的 /quit 是 System.exit(0)，虚拟屏随持有它的进程一起释放。
+                                         */
+                                        try {
+                                            new Thread(new Runnable() {
+                                                public void run() {
+                                                    try {
+                                                        java.net.HttpURLConnection c = (java.net.HttpURLConnection)
+                                                                new java.net.URL("http://127.0.0.1:" + p4 + "/quit").openConnection();
+                                                        c.setConnectTimeout(1200);
+                                                        c.setReadTimeout(1200);
+                                                        c.getResponseCode();
+                                                        c.disconnect();
+                                                    } catch (Throwable t) { /* 停不掉也不能拖住 UI */ }
+                                                }
+                                            }).start();
+                                        } catch (Throwable t) { /* ignore */ }
                                         notifyUserDeleted(p4, true, -1);
                                         ui.post(new Runnable() { public void run() { removeWin(p4); } });
                                         return true;

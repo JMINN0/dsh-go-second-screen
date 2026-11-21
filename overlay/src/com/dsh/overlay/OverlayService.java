@@ -690,6 +690,33 @@ int dx = (int)(e.getRawX() - downX);
                                *   3) 碰一下就没了 —— 现在必须「进环 + 停留 400ms 锁定」才允许执行，
                                *      单纯滑过去松手不会删。
                                */
+                              /* **先跟手。** 2026-11-21 挑刺方抓到：上一版把这段删了，窗口完全拖不动。 */
+                              int sw2 = getResources().getDisplayMetrics().widthPixels;
+                              int sh2 = getResources().getDisplayMetrics().heightPixels;
+                              int kw2 = Math.max(dp(40), curW);
+                              int kh2 = Math.max(dp(40), curH);
+                              int kx2 = Math.max(dp(72), kw2 / 2);
+                              lp.x = Math.max(-(kw2 - kx2), Math.min(sw2 - kx2, startX + dx));
+                              lp.y = Math.max(0, Math.min(Math.max(0, sh2 - kh2), startY + dy));
+                              try { wm.updateViewLayout(root, lp); } catch (Throwable t) { }
+                              
+                              /* 圈一出现就显示（幽灵态），不用等进圈 */
+                              if (!railShown) showDrop();
+                              /* **进圈判定 + 出圈复位。**
+                               * 挑刺方抓到：原来 docked 一旦置 true 就再不复位，
+                               * 拖下去又拖回上面松手照样删 —— 这是「碰一下就没了」的主路径。
+                               * 现在每帧按当前距离重算，出圈立刻退出。
+                               */
+                              double dd = Math.hypot(e.getRawX() - dropX(), e.getRawY() - dropY());
+                              if (dd < dp(60)) {
+                                  docked = true;
+                              } else if (docked) {
+                                  docked = false;
+                                  dropEnterAt = 0;
+                                  dropState = 0;
+                                  setDropState(0);
+                              }
+                              
                               if (dropEnterAt == 0) {
                                   dropEnterAt = System.currentTimeMillis();
                                   setDropState(1);
@@ -707,6 +734,7 @@ int dx = (int)(e.getRawX() - downX);
                                 final boolean locked = (dropState == 2);
                                 docked = false;
                                 dropEnterAt = 0;
+                                dropState = 0;      // **必须复位**，否则下次一进圈就是锁定态
                                 hideRail();
                                 if (locked) {
                                     final int dp2 = port;
